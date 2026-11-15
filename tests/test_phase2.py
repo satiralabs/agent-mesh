@@ -30,6 +30,8 @@ EXPECTED_TOOLS = {
     "mesh_use_service",
     # v2.1: the tool set grew by design (handover filing).
     "mesh_handover_log",
+    # v2.2: the tool set grew by design (task-thread comments).
+    "mesh_task_comment",
 }
 
 

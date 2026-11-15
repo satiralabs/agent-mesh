@@ -86,6 +86,19 @@ class MeshClient:
     def progress(self, task_id: str, note: str):
         return self._call("POST", f"/tasks/{task_id}/progress", {"note": note})
 
+    # collaboration (v2.2): participants + the shared comment thread
+    def add_participant(self, task_id: str, agent_id: str):
+        return self._call("POST", f"/tasks/{task_id}/participants",
+                          {"agent_id": agent_id})
+
+    def remove_participant(self, task_id: str, agent_id: str):
+        return self._call("DELETE",
+                          f"/tasks/{task_id}/participants/{agent_id}")
+
+    def add_comment(self, task_id: str, body: str):
+        return self._call("POST", f"/tasks/{task_id}/comments",
+                          {"body": body})
+
     # vault
     def vault_add_service(self, **kw):
         return self._call("POST", "/vault/services", kw, admin=True)

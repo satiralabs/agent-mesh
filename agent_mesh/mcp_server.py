@@ -71,10 +71,16 @@ TOOLS = [
         "description": "Create a task and send it (DRAFT -> SENT). Assign "
                        "to an agent id (assignee) or a capability; an "
                        "assignee starting with 'agt_' is treated as an "
-                       "agent id, anything else as a capability.",
+                       "agent id, anything else as a capability. The "
+                       "assignee is the LEAD; optional participants "
+                       "(agent ids) join as collaborators who can see "
+                       "the task, comment on its thread and add progress "
+                       "notes — several agents working one task together.",
         "inputSchema": _schema(
             {"title": _STR, "instructions": _STR, "assignee": _STR,
              "assignee_agent": _STR, "assignee_capability": _STR,
+             "participants": {"type": "array", "items": _STR,
+                              "description": "Collaborator agent ids"},
              "priority": _STR, "idempotency_key": _STR},
             required=["title"]),
     },
@@ -94,15 +100,28 @@ TOOLS = [
     {
         "name": "mesh_task_list",
         "description": "List tasks, optionally filtered by assignee, "
-                       "requester or status.",
+                       "requester, participant or status. An agent's "
+                       "list only contains tasks it is involved in.",
         "inputSchema": _schema(
-            {"assignee": _STR, "requester": _STR, "status": _STR}),
+            {"assignee": _STR, "requester": _STR, "participant": _STR,
+             "status": _STR}),
     },
     {
         "name": "mesh_task_get",
-        "description": "Get one task in full (status, progress notes, "
+        "description": "Get one task in full (status, participants, "
+                       "progress notes, the shared comment thread, "
                        "result).",
         "inputSchema": _schema({"task_id": _STR}, required=["task_id"]),
+    },
+    {
+        "name": "mesh_task_comment",
+        "description": "Add a comment to a task's shared thread. The "
+                       "requester, the lead and any participant may "
+                       "comment; the thread is visible to all of them "
+                       "and syncs across nodes with the task.",
+        "inputSchema": _schema(
+            {"task_id": _STR, "text": _STR},
+            required=["task_id", "text"]),
     },
     {
         "name": "mesh_use_service",
@@ -146,6 +165,7 @@ class MeshTools:
             "mesh_task_update": self.task_update,
             "mesh_task_list": self.task_list,
             "mesh_task_get": self.task_get,
+            "mesh_task_comment": self.task_comment,
             "mesh_use_service": self.use_service,
             "mesh_handover_log": self.handover_log,
         }
@@ -167,11 +187,15 @@ class MeshTools:
 
     def inbox(self, args):
         me = self.my_id()
+        participating = [
+            t for t in self.client.list_tasks(participant=me)["tasks"]
+            if t.get("assignee_agent") != me and t.get("requester") != me]
         return {
             "agent": me,
             "messages": self.client.list_messages()["messages"],
             "tasks_assigned": self.client.list_tasks(assignee=me)["tasks"],
             "tasks_requested": self.client.list_tasks(requester=me)["tasks"],
+            "tasks_participating": participating,
         }
 
     def task_create(self, args):
@@ -189,6 +213,8 @@ class MeshTools:
             kw["assignee_agent"] = assignee_agent
         if assignee_cap:
             kw["assignee_capability"] = assignee_cap
+        if args.get("participants"):
+            kw["participants"] = list(args["participants"])
         if args.get("priority"):
             kw["priority"] = args["priority"]
         if args.get("idempotency_key"):
@@ -221,10 +247,13 @@ class MeshTools:
     def task_list(self, args):
         return self.client.list_tasks(
             assignee=args.get("assignee"), requester=args.get("requester"),
-            status=args.get("status"))
+            participant=args.get("participant"), status=args.get("status"))
 
     def task_get(self, args):
         return self.client.get_task(args["task_id"])
+
+    def task_comment(self, args):
+        return self.client.add_comment(args["task_id"], args["text"])
 
     def handover_log(self, args):
         kw = {"title": args["title"]}
