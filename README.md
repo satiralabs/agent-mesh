@@ -117,8 +117,95 @@ python3 -m agent_mesh.node --port 8790 --data-dir ~/.agent-mesh-node
 ### Run the tests
 
 ```bash
-python3 -m unittest discover -s tests -v   # 11 tests, stdlib unittest
+python3 -m unittest discover -s tests -v   # Phase 1 + Phase 2, stdlib unittest
 ```
 
 Not in Phase 1 (by design): GUI, MCP adapter (Phase 2), node-to-node /
 Tailscale transport (Phase 4).
+
+---
+
+## v2 Phase 2 — adapters: how an agent connects
+
+Phase 2 gives every agent four ways into the same node. Start a node
+first (see Phase 1 above), then pick one:
+
+### 1. Connection pack (do this first — it registers the agent)
+
+```bash
+export AGENT_MESH_ADMIN='your-node-admin-token'
+python3 -m agent_mesh.pack --node http://127.0.0.1:8790 \
+  --name "My Agent" --capabilities coding,research \
+  --out ~/agent-mesh-pack.json
+```
+
+This registers the agent and writes a ready-to-paste MCP config
+(`mcpServers` snippet) with file permissions `0600`. **The pack file is
+the only place the agent's token ever appears** — treat it like a
+password. Paste the snippet into your agent tool's MCP configuration
+(Claude-style `mcpServers` JSON), and the agent gets the mesh tools
+below on its next start.
+
+### 2. MCP server (`agent_mesh/mcp_server.py`)
+
+A Model Context Protocol server over stdio (newline-delimited JSON-RPC
+2.0). The `mcp` Python package is not installable in every environment,
+so the minimal protocol (`initialize`, `ping`, `tools/list`,
+`tools/call`) is implemented by hand with stdlib only. It reads
+`AGENT_MESH_NODE` and `AGENT_MESH_TOKEN` from its environment — exactly
+what the connection pack sets. Tools:
+
+| Tool | What it does |
+|---|---|
+| `mesh_agents_list` | List registered agents |
+| `mesh_send` | Send a message to another agent |
+| `mesh_inbox` | My messages + tasks assigned to me / requested by me |
+| `mesh_task_create` | Create a task and send it to an agent or capability |
+| `mesh_task_update` | accept / start / review / done / fail / progress a task |
+| `mesh_task_list` / `mesh_task_get` | List / inspect tasks |
+| `mesh_use_service` | Broker decision for a vault service: `allow` / `deny` / `needs_approval` — never a secret |
+
+Tool errors come back as MCP results with `isError: true`; the server
+keeps running.
+
+### 3. CLI shim (`agent_mesh/mesh_cli.py`)
+
+For agents and scripts that can run a shell but not MCP:
+
+```bash
+export AGENT_MESH_NODE=http://127.0.0.1:8790
+export AGENT_MESH_TOKEN='<agent token from the pack>'
+python3 -m agent_mesh.mesh_cli agents
+python3 -m agent_mesh.mesh_cli task-create --title "Check the logs" \
+  --assignee agt_0123abcd4567ef89
+python3 -m agent_mesh.mesh_cli inbox
+python3 -m agent_mesh.mesh_cli task-update --id tsk_... --action accept
+python3 -m agent_mesh.mesh_cli task-list
+python3 -m agent_mesh.mesh_cli use-service --service shipd --action read
+```
+
+Every subcommand prints JSON.
+
+### 4. File-drop (`agent_mesh/filedrop.py`)
+
+For agents that can only write files. Drop a `.json` file in a watched
+folder:
+
+```json
+{"kind": "task", "title": "Nightly check", "assignee_agent": "agt_..."}
+{"kind": "message", "recipient": "agt_...", "msg_type": "INFO", "payload": "hi"}
+```
+
+```bash
+python3 -m agent_mesh.filedrop --dir ~/mesh-drop          # watch (polls)
+python3 -m agent_mesh.filedrop --dir ~/mesh-drop --once   # one pass
+```
+
+Submitted files move to `processed/`; bad files move to `failed/` with
+a `<name>.error.txt` explaining why.
+
+Phase 2 tests (`tests/test_phase2.py`) drive the whole pilot flow —
+task create → accept → progress → review → done, plus messages and a
+vault decision — through two real MCP server subprocesses, and cover
+the file-drop adapter, the CLI shim and the pack generator, including a
+scan proving no secret appears in any MCP response.
