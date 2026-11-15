@@ -28,6 +28,8 @@ EXPECTED_TOOLS = {
     "mesh_agents_list", "mesh_send", "mesh_inbox", "mesh_task_create",
     "mesh_task_update", "mesh_task_list", "mesh_task_get",
     "mesh_use_service",
+    # v2.1: the tool set grew by design (handover filing).
+    "mesh_handover_log",
 }
 
 

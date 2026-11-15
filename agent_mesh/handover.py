@@ -204,3 +204,62 @@ def watch_and_sync(memory_dir: str = DEFAULT_MEMORY_DIR, out_dir: str = DEFAULT_
         except Exception as e:
             print(f"Error during sync cycle: {e}")
         time.sleep(interval)
+
+
+# ---------------------------------------------------------------------------
+# v2.1: mesh handover-entry filing CLI.
+#
+# Everything above this line is the v1 handover-pack engine, unchanged.
+# What follows is the v2.1 filing path: an agent (or a script filing on
+# an agent's behalf) posts ONE structured handover entry to its mesh
+# node, which stores it and updates the node's HANDOVER-<node>.md.
+# This works even when the agent itself cannot or will not maintain a
+# handover file — the node does the filing.
+#
+# Run:  AGENT_MESH_NODE=http://127.0.0.1:8790 AGENT_MESH_TOKEN=<token> \
+#         python3 -m agent_mesh.handover --title "..." --asked "..." \
+#         --done "..." --verified "..." --decisions "..." \
+#         --files "..." --open "..."
+# ---------------------------------------------------------------------------
+
+def _filing_main(argv=None) -> int:
+    import argparse
+    import json as _json
+
+    from .client import MeshClient, MeshError
+
+    parser = argparse.ArgumentParser(
+        prog="agent-mesh-handover",
+        description="File one handover entry with your mesh node.")
+    parser.add_argument("--title", required=True,
+                        help="short title for this session's entry")
+    parser.add_argument("--asked", default="",
+                        help="what the user asked for")
+    parser.add_argument("--done", default="", help="what was done")
+    parser.add_argument("--verified", default="",
+                        help="how it was verified")
+    parser.add_argument("--decisions", default="",
+                        help="decisions taken, and by whom")
+    parser.add_argument("--files", default="",
+                        help="all related files: machine + full path")
+    parser.add_argument("--open", default="",
+                        help="open items still outstanding")
+    args = parser.parse_args(argv)
+    client = MeshClient(
+        os.environ.get("AGENT_MESH_NODE", "http://127.0.0.1:8790"),
+        token=os.environ.get("AGENT_MESH_TOKEN"))
+    try:
+        out = client.handover_log(
+            title=args.title, asked=args.asked, done=args.done,
+            verified=args.verified, decisions=args.decisions,
+            files=args.files, open=args.open)
+    except MeshError as exc:
+        print(_json.dumps({"error": f"HTTP {exc.status}",
+                           "detail": exc.body}))
+        return 1
+    print(_json.dumps(out, indent=2, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_filing_main())

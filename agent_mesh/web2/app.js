@@ -11,6 +11,7 @@ const TRANSITIONS = {
 };
 const state = { agents: [], tasks: [], services: {}, approvals: [],
                 entries: [], messages: [], peers: [], outbox: null,
+                handover: [], rulesVersion: "",
                 nodeInfo: null, screen: "dashboard" };
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v == null ? "" : v)
@@ -54,11 +55,12 @@ async function api(path, opts) {
 /* ---------- data loading ---------- */
 async function loadAll() {
   const [agents, tasks, services, approvals, activity, messages,
-         peers, nodeInfo] =
+         peers, nodeInfo, handover, rules] =
     await Promise.all([
       api("/agents"), api("/tasks"), api("/vault/services"),
       api("/approvals"), api("/activity?limit=100"), api("/messages"),
       api("/peers"), api("/node/info"),
+      api("/handover/entries"), api("/handover/rules"),
     ]);
   state.agents = agents.agents;
   state.tasks = tasks.tasks;
@@ -69,6 +71,8 @@ async function loadAll() {
   state.peers = peers.peers;
   state.outbox = peers.outbox;
   state.nodeInfo = nodeInfo;
+  state.handover = handover.entries;
+  state.rulesVersion = rules.version;
   $("node-status").innerHTML = '<span class="dot"></span>node online';
   renderAll();
 }
@@ -83,8 +87,31 @@ function updateApprovalBadge() {
 function renderAll() {
   renderDashboard(); renderAgents(); renderTasks();
   renderMessages(); renderVault(); renderApprovals(); renderActivity();
-  renderPeers();
+  renderPeers(); renderHandover();
   updateApprovalBadge();
+}
+
+/* ---------- handover (v2.1) ---------- */
+function renderHandover() {
+  $("handover-rules-version").textContent = state.rulesVersion || "–";
+  $("settings-handover").innerHTML =
+    `<div class="line"><span>Handover rules version</span><b>${esc(state.rulesVersion || "–")}</b></div>
+     <div class="line"><span>Handover entries filed</span><b>${state.handover.length}</b></div>`;
+  $("handover-list").innerHTML = state.handover.length
+    ? state.handover.map((e) =>
+      `<div class="row-item"><div class="row-top">
+         <b>${esc(e.title)}</b><span class="spacer"></span>
+         <span class="muted">${esc(e.agent_name || agentName(e.agent_id))} · ${esc(fmtTime(e.created_at))}</span>
+       </div>
+       <div class="mini-list">
+         <div class="line"><span>Asked</span><span>${esc(e.asked || "—")}</span></div>
+         <div class="line"><span>Done</span><span>${esc(e.done || "—")}</span></div>
+         <div class="line"><span>Verified</span><span>${esc(e.verified || "—")}</span></div>
+         <div class="line"><span>Decisions</span><span>${esc(e.decisions || "—")}</span></div>
+         <div class="line"><span>Files</span><span>${esc(e.files || "—")}</span></div>
+         <div class="line"><span>Open</span><span>${esc(e.open_items || "—")}</span></div>
+       </div></div>`).join("")
+    : '<p class="muted">No entries yet. Agents receive the handover rules automatically when they connect, and file entries with the mesh_handover_log tool or the handover CLI.</p>';
 }
 
 /* ---------- dashboard ---------- */
@@ -652,6 +679,13 @@ const SCREEN_REFRESH = {
       state.entries = activity.entries; state.agents = agents.agents;
       state.tasks = tasks.tasks; state.services = services.services;
     }, render: renderActivity },
+  handover: { load: async () => {
+      const [handover, rules, agents] = await Promise.all([
+        api("/handover/entries"), api("/handover/rules"),
+        api("/agents")]);
+      state.handover = handover.entries; state.rulesVersion = rules.version;
+      state.agents = agents.agents;
+    }, render: renderHandover },
   settings: { load: async () => {
       const [peers, nodeInfo, agents, tasks, services] = await Promise.all([
         api("/peers"), api("/node/info"), api("/agents"), api("/tasks"),
@@ -698,7 +732,8 @@ document.addEventListener("visibilitychange", () => {
 /* ---------- navigation + login ---------- */
 const TITLES = { dashboard: "Dashboard", agents: "Agents", tasks: "Tasks",
                  messages: "Messages", vault: "Vault", approvals: "Approvals",
-                 activity: "Activity", settings: "Settings" };
+                 activity: "Activity", handover: "Handover",
+                 settings: "Settings" };
 document.querySelectorAll(".nav-btn[data-screen]").forEach((btn) =>
   btn.addEventListener("click", () => {
     state.screen = btn.dataset.screen;

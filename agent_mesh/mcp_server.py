@@ -113,11 +113,27 @@ TOOLS = [
         "inputSchema": _schema(
             {"service": _STR, "action": _STR}, required=["service"]),
     },
+    {
+        "name": "mesh_handover_log",
+        "description": "File one handover entry for the session just "
+                       "worked (mesh handover rules: one independent "
+                       "dated entry per session; asked / done / how "
+                       "verified / decisions / end state / open items; "
+                       "all related files with machine + full path; "
+                       "failures recorded plainly; NEVER any credential "
+                       "values — locations only). The node stores it and "
+                       "updates its HANDOVER-<node>.md export.",
+        "inputSchema": _schema(
+            {"title": _STR, "asked": _STR, "done": _STR,
+             "verified": _STR, "decisions": _STR, "files": _STR,
+             "open": _STR},
+            required=["title"]),
+    },
 ]
 
 
 class MeshTools:
-    """The eight mesh tools, backed by a MeshClient for one agent."""
+    """The mesh tools, backed by a MeshClient for one agent."""
 
     def __init__(self, client: MeshClient):
         self.client = client
@@ -131,6 +147,7 @@ class MeshTools:
             "mesh_task_list": self.task_list,
             "mesh_task_get": self.task_get,
             "mesh_use_service": self.use_service,
+            "mesh_handover_log": self.handover_log,
         }
 
     def my_id(self) -> str:
@@ -208,6 +225,14 @@ class MeshTools:
 
     def task_get(self, args):
         return self.client.get_task(args["task_id"])
+
+    def handover_log(self, args):
+        kw = {"title": args["title"]}
+        for key in ("asked", "done", "verified", "decisions", "files",
+                    "open"):
+            if args.get(key):
+                kw[key] = args[key]
+        return self.client.handover_log(**kw)
 
     def use_service(self, args):
         try:

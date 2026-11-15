@@ -258,5 +258,98 @@ class TestVaultSharing(unittest.TestCase):
         self.assertIn("/grants", js)
 
 
+# ---------------------------------------------------------------------------
+# B. Handover automation
+# ---------------------------------------------------------------------------
+class TestHandover(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.node, cls.data_dir, cls.base = start_node("p7-ho")
+        cls.admin = MeshClient(cls.base, admin_token=ADMIN)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _register(self, name):
+        reg = self.admin.register(name=name, role="worker")
+        return reg["agent"], MeshClient(self.base, token=reg["token"])
+
+    def test_rules_endpoint(self):
+        _agent, client = self._register("P7 Rules Reader")
+        out = client.handover_rules()
+        self.assertTrue(out["version"])
+        self.assertIn("unique", out["rules"].lower())
+        self.assertIn("never", out["rules"].lower())
+
+    def test_starter_delivered_exactly_once(self):
+        agent, client = self._register("P7 Starter")
+        # Registration already delivered it.
+        msgs = client.list_messages()["messages"]
+        starters = [m for m in msgs if m["msg_type"] == "HANDOVER_RULES"]
+        self.assertEqual(len(starters), 1)
+        self.assertIn("mesh_handover_log", str(starters[0]["payload"]))
+        # Re-heartbeats must NOT resend it.
+        client.heartbeat()
+        client.heartbeat()
+        msgs = client.list_messages()["messages"]
+        starters = [m for m in msgs if m["msg_type"] == "HANDOVER_RULES"]
+        self.assertEqual(len(starters), 1)
+
+    def test_entry_posts_persists_and_exports(self):
+        agent, client = self._register("P7 Filer")
+        out = client.handover_log(
+            title="Built the widget", asked="build a widget",
+            done="built it", verified="ran the widget test suite",
+            decisions="used stdlib only",
+            files="arch-pc: /home/benji/widget/widget.py",
+            open="deploy to the VPS")
+        entry = out["entry"]
+        self.assertEqual(entry["agent_name"], "P7 Filer")
+        # Persisted: admin lists all entries, the agent lists its own.
+        all_entries = self.admin.handover_entries()["entries"]
+        self.assertIn(entry["id"], [e["id"] for e in all_entries])
+        own = client.handover_entries()["entries"]
+        self.assertEqual([e["id"] for e in own], [entry["id"]])
+        # Exported markdown contains the entry under the agent's name.
+        export = os.path.join(self.data_dir, "HANDOVER-p7-ho.md")
+        self.assertTrue(os.path.exists(export))
+        with open(export) as fh:
+            text = fh.read()
+        self.assertIn("## P7 Filer", text)
+        self.assertIn("Built the widget", text)
+        self.assertIn("arch-pc: /home/benji/widget/widget.py", text)
+
+    def test_scanner_blocks_credential_shaped_entry(self):
+        _agent, client = self._register("P7 Leaker")
+        with self.assertRaises(MeshError) as ctx:
+            client.handover_log(
+                title="oops",
+                done="the deploy password = hunter2hunter2 is set")
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertIn("secret scanner",
+                      json.dumps(ctx.exception.body).lower())
+        # Nothing was stored.
+        entries = self.admin.handover_entries()["entries"]
+        self.assertFalse(any(e["title"] == "oops" for e in entries))
+
+    def test_cli_files_an_entry(self):
+        reg = self.admin.register(name="P7 CLI Filer", role="worker")
+        env = dict(os.environ)
+        env["AGENT_MESH_NODE"] = self.base
+        env["AGENT_MESH_TOKEN"] = reg["token"]
+        env["PYTHONPATH"] = REPO + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run(
+            [sys.executable, "-m", "agent_mesh.handover",
+             "--title", "CLI session", "--asked", "file via cli",
+             "--done", "filed", "--verified", "this test"],
+            capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        entries = self.admin.handover_entries()["entries"]
+        self.assertTrue(any(e["title"] == "CLI session"
+                            and e["agent_name"] == "P7 CLI Filer"
+                            for e in entries))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,7 @@
         <button class="nav-btn" data-screen="vault"><span class="icon">⚿</span>Vault</button>
         <button class="nav-btn" data-screen="approvals"><span class="icon">✋</span>Approvals<span id="nav-approval-badge" class="badge alert hidden">0</span></button>
         <button class="nav-btn" data-screen="activity"><span class="icon">≣</span>Activity</button>
+        <button class="nav-btn" data-screen="handover"><span class="icon">⇄</span>Handover</button>
         <button class="nav-btn" data-screen="settings"><span class="icon">⚙</span>Settings</button>
       </nav>
       <div class="aside-foot">
@@ -218,11 +219,25 @@
         </div>
       </section>
 
-      <!-- 8. Settings -->
+      <!-- 8. Handover -->
+      <section id="screen-handover" class="screen">
+        <div class="card">
+          <h3>Handover entries</h3>
+          <p class="muted">One entry per agent session, filed by the
+            agents themselves (MCP tool, CLI, or API). The node keeps
+            them all and maintains an exported
+            <code>HANDOVER-&lt;node&gt;.md</code> in its data folder.
+            Rules version: <b id="handover-rules-version">–</b></p>
+          <div id="handover-list"></div>
+        </div>
+      </section>
+
+      <!-- 9. Settings -->
       <section id="screen-settings" class="screen">
         <div class="card">
           <h3>Node</h3>
           <div id="settings-node" class="mini-list"></div>
+          <div id="settings-handover" class="mini-list"></div>
           <button id="settings-lock" class="btn">Lock (forget admin token on this tab)</button>
         </div>
         <div class="card">

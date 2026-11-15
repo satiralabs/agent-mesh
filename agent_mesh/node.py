@@ -26,6 +26,8 @@ from urllib.parse import parse_qs, urlparse
 
 from . import bus, peers as peers_mod
 from .approvals import ApprovalStore
+from .handover_log import HandoverStore
+from .handover_rules import rules_text, rules_version, starter_message
 from .pack import build_pack
 from .registry import DEFAULT_ROLE, Registry, order_denial
 from .scan import scan_fields
@@ -82,6 +84,10 @@ class Node:
         self.identity = peers_mod.load_identity(
             data_dir, name=node_name or os.environ.get("AGENT_MESH_NODE_NAME"))
         self.node_id = self.identity["node_id"]
+        # v2.1 handover automation: entry store + exported handover file.
+        self.handover = HandoverStore(
+            os.path.join(data_dir, "handover.db"), data_dir,
+            self.identity["name"])
         self.peers = peers_mod.PeerStore(os.path.join(data_dir, "peers.db"))
         self.public_url = (public_url
                            or os.environ.get("AGENT_MESH_PUBLIC_URL") or "")
@@ -115,6 +121,29 @@ class Node:
         if self.is_admin(headers):
             return dict(OWNER)
         return None
+
+    # -- handover starter (v2.1) -------------------------------------------
+    def deliver_handover_starter(self, agent: Dict[str, Any]) -> bool:
+        """Send the agent its ONE handover-rules starter message for the
+        current rules version. Idempotent per agent per version: safe
+        to call on registration and on every heartbeat — only the first
+        call per version actually sends. Never raises: a starter
+        failure must not break registration or heartbeats."""
+        try:
+            version, text = starter_message()
+            if not self.handover.starter_needed(agent["id"], version):
+                return False
+            bus.send_message(sender="owner", recipient=agent["id"],
+                             msg_type="HANDOVER_RULES", payload=text,
+                             db_path=self.bus_db)
+            self.handover.mark_starter(agent["id"], version)
+            self.audit_event({"event": "handover_starter_sent",
+                              "agent": agent["id"], "service": "",
+                              "action": "handover_rules",
+                              "outcome": f"v{version}"})
+            return True
+        except Exception:
+            return False
 
     # -- audit ------------------------------------------------------------
     def audit_event(self, entry: Dict[str, Any]) -> None:
@@ -517,6 +546,21 @@ def make_handler(node: Node):
                     status = qs.get("status", [None])[0]
                     return self._send(
                         200, {"approvals": node.approvals.list(status)})
+                if path == "/handover/rules":
+                    actor = self._require_actor()
+                    if actor is None:
+                        return
+                    return self._send(200, {
+                        "version": rules_version(), "rules": rules_text()})
+                if path == "/handover/entries":
+                    actor = self._require_actor()
+                    if actor is None:
+                        return
+                    if node.is_admin(self.headers):
+                        entries = node.handover.list_entries()
+                    else:
+                        entries = node.handover.list_entries(actor["id"])
+                    return self._send(200, {"entries": entries})
                 if path == "/activity":
                     if not self._require_admin():
                         return
@@ -677,6 +721,7 @@ def make_handler(node: Node):
                         node=body.get("node", ""),
                         capabilities=body.get("capabilities", []),
                         role=body.get("role") or DEFAULT_ROLE)
+                    node.deliver_handover_starter(agent)
                     # Token is returned exactly once, here.
                     return self._send(201, {"agent": agent, "token": token})
                 if path == "/agents/pack":
@@ -689,6 +734,7 @@ def make_handler(node: Node):
                         node=body.get("node", ""),
                         capabilities=body.get("capabilities", []),
                         role=body.get("role") or DEFAULT_ROLE)
+                    node.deliver_handover_starter(agent)
                     pack = build_pack(self._node_url(), agent, token)
                     return self._send(201, {"agent": agent, "pack": pack})
                 if path.startswith("/agents/") and path.endswith("/pack"):
@@ -726,7 +772,35 @@ def make_handler(node: Node):
                     if agent is None:
                         return
                     node.registry.heartbeat(agent["id"], body.get("status"))
+                    # First heartbeat also delivers the handover
+                    # starter (idempotent — registration usually beat
+                    # it, and re-heartbeats never resend).
+                    node.deliver_handover_starter(agent)
                     return self._send(200, {"agent": node.registry.get(agent["id"])})
+                if path == "/handover/entries":
+                    actor = self._require_actor()
+                    if actor is None:
+                        return
+                    if not body.get("title"):
+                        return self._send(400, {"error": "title required"})
+                    if not self._scan_gate(
+                            actor["id"], actor.get("role") or "",
+                            {"title": body.get("title", ""),
+                             "asked": body.get("asked", ""),
+                             "done": body.get("done", ""),
+                             "verified": body.get("verified", ""),
+                             "decisions": body.get("decisions", ""),
+                             "files": body.get("files", ""),
+                             "open": body.get("open", "")},
+                            body, "handover_entry"):
+                        return
+                    entry = node.handover.add_entry(
+                        actor["id"], actor.get("name", ""), body)
+                    node.audit_event({
+                        "event": "handover_entry", "agent": actor["id"],
+                        "service": "", "action": "handover_log",
+                        "outcome": entry["id"]})
+                    return self._send(201, {"entry": entry})
                 if path == "/messages":
                     actor = self._require_actor()
                     if actor is None:
