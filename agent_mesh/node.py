@@ -14,6 +14,7 @@ the owner (admin token) may act directly as the reserved agent "owner"
 so the GUI needs no separate agent token.
 """
 import argparse
+import hmac as hmac_mod
 import json
 import os
 import threading
@@ -110,8 +111,10 @@ class Node:
         return self.registry.authenticate(token)
 
     def is_admin(self, headers) -> bool:
-        return bool(self.admin_token) and headers.get(
-            "X-Admin-Token", "") == self.admin_token
+        if not self.admin_token:
+            return False
+        return hmac_mod.compare_digest(
+            headers.get("X-Admin-Token", ""), self.admin_token)
 
     def actor_from(self, headers) -> Optional[Dict[str, Any]]:
         """An authenticated agent, or the owner pseudo-agent for admin."""
@@ -350,11 +353,22 @@ def make_handler(node: Node):
                 return self._send(404, {"error": "not found"})
             return self._send_bytes(200, data, content_type)
 
+        # Hard cap on request bodies (sec/perf fix): without it a
+        # single request could force the node to buffer unbounded
+        # bytes in memory. Oversized requests get a 413 and the
+        # connection is closed (the unread body must not be parsed
+        # as the next keep-alive request).
+        MAX_BODY_BYTES = 10 * 1024 * 1024
+
         def _body(self) -> Dict[str, Any]:
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except (TypeError, ValueError):
                 length = 0
+            if length > self.MAX_BODY_BYTES:
+                self._oversized = True
+                self._raw = b""
+                return {}
             if length <= 0:
                 self._raw = b""
                 return {}
@@ -590,17 +604,22 @@ def make_handler(node: Node):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
             body = self._body()
+            if getattr(self, "_oversized", False):
+                self.close_connection = True
+                return self._send(413, {"error": "request body too large"})
             try:
                 # -- Phase 4 peer endpoints -------------------------------
                 if path == "/peer/pair":
                     # Authenticated by the one-time pairing code itself.
+                    # Validate the body BEFORE consuming the code, so a
+                    # malformed attempt cannot burn a valid code.
+                    if not body.get("node_id") or not body.get("url"):
+                        return self._send(
+                            400, {"error": "node_id and url required"})
                     if not node.peers.consume_code(body.get("code", "")):
                         return self._send(
                             403, {"error": "invalid, expired or already "
                                            "used pairing code"})
-                    if not body.get("node_id") or not body.get("url"):
-                        return self._send(
-                            400, {"error": "node_id and url required"})
                     import secrets as _secrets
                     peer_secret = _secrets.token_urlsafe(32)
                     node.peers.add_peer(body["node_id"],
@@ -1085,6 +1104,9 @@ def make_handler(node: Node):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
             body = self._body()
+            if getattr(self, "_oversized", False):
+                self.close_connection = True
+                return self._send(413, {"error": "request body too large"})
             try:
                 if path.startswith("/vault/services/"):
                     if not self._require_admin():
