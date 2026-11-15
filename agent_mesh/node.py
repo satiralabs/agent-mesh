@@ -231,6 +231,19 @@ class Node:
                            "name": self.identity["name"], "agents": agents},
                           f"directory:{digest}")
 
+    def enqueue_directory_all(self) -> None:
+        """Push this node's agent directory to EVERY paired peer.
+
+        Called whenever the local directory changes (agent registered,
+        pack rotated / reconnected, agent disconnected): without it a
+        peer keeps a stale directory and cannot see — or deliver to —
+        a newly registered agent until someone syncs by hand (audit
+        F6). The content-hash dedupe in enqueue_directory makes repeat
+        pushes cheap, and the persistent outbox holds the update for
+        peers that are currently offline."""
+        for peer in self.peers.list_peers_safe():
+            self.enqueue_directory(peer["node_id"])
+
     def sync_task_to_peer(self, task: Dict[str, Any]) -> None:
         """Queue a snapshot of a federated task for its other node."""
         target = task.get("home_node") or task.get("origin_node")
@@ -753,6 +766,7 @@ def make_handler(node: Node):
                         capabilities=body.get("capabilities", []),
                         role=body.get("role") or DEFAULT_ROLE)
                     node.deliver_handover_starter(agent)
+                    node.enqueue_directory_all()
                     # Token is returned exactly once, here.
                     return self._send(201, {"agent": agent, "token": token})
                 if path == "/agents/pack":
@@ -771,6 +785,7 @@ def make_handler(node: Node):
                         capabilities=body.get("capabilities", []),
                         role=body.get("role") or DEFAULT_ROLE)
                     node.deliver_handover_starter(agent)
+                    node.enqueue_directory_all()
                     pack = build_pack_variant(self._node_url(), agent,
                                               token, fmt)
                     return self._send(201, {"agent": agent, "pack": pack,
@@ -790,6 +805,7 @@ def make_handler(node: Node):
                             400, {"error": f"unknown pack format {fmt!r}; "
                                            f"allowed {PACK_FORMATS}"})
                     token = node.registry.rotate_token(agent_id)
+                    node.enqueue_directory_all()
                     pack = build_pack_variant(self._node_url(), agent,
                                               token, fmt)
                     return self._send(200, {"agent": agent, "pack": pack,
@@ -807,6 +823,7 @@ def make_handler(node: Node):
                     if agent is None:
                         return self._send(404, {"error": "agent not found"})
                     node.registry.revoke(agent_id)
+                    node.enqueue_directory_all()
                     node.audit_event({
                         "event": "agent_disconnected", "agent": agent_id,
                         "outcome": "revoked"})

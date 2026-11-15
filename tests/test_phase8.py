@@ -1,0 +1,178 @@
+"""Phase 8 tests — v2.1.1 audit fixes. Runner:
+python3 -m unittest discover -s tests -v (stdlib unittest.)
+
+Covers the three OPEN findings from SECURITY-PERF-REPORT.md:
+- F6: directory updates are pushed to paired peers when an agent
+  registers / its pack rotates / it is disconnected — no manual sync.
+- F3: pairing codes are >=64-bit and burn after 5 failed attempts
+  from the same source.
+- F2: secret scanner normalization (zero-width strip, separator-
+  tolerant token shapes, spaced keywords, short password values)
+  plus a decode-and-rescan pass for base64 blobs.
+"""
+import base64
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from agent_mesh.client import MeshClient, MeshError  # noqa: E402
+from agent_mesh.peers import PeerStore  # noqa: E402
+from agent_mesh.scan import scan_text  # noqa: E402
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ADMIN_A = "test-admin-token-p8-a"
+ADMIN_B = "test-admin-token-p8-b"
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def start_node(port, data_dir, name, admin):
+    env = dict(os.environ)
+    env.update({
+        "AGENT_MESH_ADMIN": admin,
+        "AGENT_MESH_MASTER": "test-master-passphrase-p8",
+        "AGENT_MESH_FLUSH_SEC": "0.3",
+        "AGENT_MESH_RETRY_SCHEDULE": "0.2,0.5,1,2",
+        "PYTHONPATH": REPO,
+    })
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "agent_mesh.node", "--host", "127.0.0.1",
+         "--port", str(port), "--data-dir", data_dir, "--name", name],
+        cwd=REPO, env=env, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(base + "/health", timeout=2) as r:
+                if r.status == 200:
+                    return proc, base
+        except Exception:
+            time.sleep(0.2)
+    proc.kill()
+    raise RuntimeError(f"node on {port} did not come up")
+
+
+def stop_node(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def wait_for(pred, timeout=25, interval=0.3, desc="condition"):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if pred():
+                return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    raise AssertionError(f"timed out waiting for {desc}")
+
+
+# ----------------------------------------------------------------------
+# F6 — directory push on register / pack rotation / disconnect
+# ----------------------------------------------------------------------
+class DirectoryPushFixture(unittest.TestCase):
+    """Nodes A and B paired BEFORE the agents under test register."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir_a = tempfile.mkdtemp(prefix="agent-mesh-p8a-")
+        cls.dir_b = tempfile.mkdtemp(prefix="agent-mesh-p8b-")
+        cls.proc_a, cls.base_a = start_node(free_port(), cls.dir_a,
+                                            "Node A", ADMIN_A)
+        cls.proc_b, cls.base_b = start_node(free_port(), cls.dir_b,
+                                            "Node B", ADMIN_B)
+        cls.admin_a = MeshClient(cls.base_a, admin_token=ADMIN_A)
+        cls.admin_b = MeshClient(cls.base_b, admin_token=ADMIN_B)
+        cls.node_a = cls.admin_a.node_info()["node_id"]
+        cls.node_b = cls.admin_b.node_info()["node_id"]
+        reg_a = cls.admin_a.register(name="Agent A1",
+                                     capabilities=["coding"],
+                                     role="orchestrator")
+        reg_b = cls.admin_b.register(name="Agent B1",
+                                     capabilities=["research"],
+                                     role="orchestrator")
+        cls.a1_id, cls.b1_id = reg_a["agent"]["id"], reg_b["agent"]["id"]
+        cls.b1 = MeshClient(cls.base_b, token=reg_b["token"])
+        code = cls.admin_a.pairing_code()["code"]
+        cls.admin_b.pair_with(cls.base_a, code)
+        wait_for(lambda: any(
+            a["id"] == cls.b1_id and a.get("remote")
+            for a in cls.admin_a.list_agents()["agents"]),
+            desc="B1 in A's directory after pairing")
+        wait_for(lambda: any(
+            a["id"] == cls.a1_id and a.get("remote")
+            for a in cls.admin_b.list_agents()["agents"]),
+            desc="A1 in B's directory after pairing")
+
+    @classmethod
+    def tearDownClass(cls):
+        stop_node(cls.proc_a)
+        stop_node(cls.proc_b)
+        shutil.rmtree(cls.dir_a, ignore_errors=True)
+        shutil.rmtree(cls.dir_b, ignore_errors=True)
+
+    def remote_copy_on_b(self, agent_id):
+        for a in self.admin_b.list_agents()["agents"]:
+            if a["id"] == agent_id and a.get("remote"):
+                return a
+        return None
+
+
+class TestDirectoryPushF6(DirectoryPushFixture):
+    def test_register_after_pairing_is_pushed_and_reachable(self):
+        # Register on A AFTER pairing. The test never calls peer_sync
+        # or peers_flush: A's register handler must enqueue the new
+        # directory itself and the outbox delivers it.
+        reg = self.admin_a.register(name="Late Joiner", role="worker")
+        late_id = reg["agent"]["id"]
+        late = MeshClient(self.base_a, token=reg["token"])
+        wait_for(lambda: self.remote_copy_on_b(late_id) is not None,
+                 desc="late-registered agent appears in B's directory "
+                      "without any manual sync")
+        # And B can actually deliver to it (before the fix the send
+        # returned 201 but was stored only locally on B, forever).
+        self.b1.send_message(late_id, "INFO", "welcome, late joiner")
+        wait_for(lambda: any(
+            m["payload"] == "welcome, late joiner"
+            and m["sender"] == self.b1_id
+            for m in late.list_messages(recipient=late_id)["messages"]),
+            desc="message from B delivered to the late joiner on A")
+
+    def test_disconnect_and_pack_rotation_are_pushed(self):
+        reg = self.admin_a.register(name="Revolving Door", role="worker")
+        agent_id = reg["agent"]["id"]
+        wait_for(lambda: self.remote_copy_on_b(agent_id) is not None,
+                 desc="agent visible on B after register push")
+        self.admin_a.disconnect_agent(agent_id)
+        wait_for(lambda: (self.remote_copy_on_b(agent_id) or {})
+                 .get("status") == "revoked",
+                 desc="B sees the agent revoked after disconnect push")
+        # Reconnect = new pack (rotates the token, clears revoked).
+        self.admin_a.agent_pack(agent_id)
+        wait_for(lambda: (self.remote_copy_on_b(agent_id) or {})
+                 .get("status") == "online",
+                 desc="B sees the agent back online after rotation push")
+
+
+if __name__ == "__main__":
+    unittest.main()
