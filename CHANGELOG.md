@@ -1,5 +1,40 @@
 # Changelog
 
+## v2.1.1 — 2026-11-15
+
+Fixes for the three OPEN findings of the independent v2.1 security
+audit (`SECURITY-PERF-REPORT.md`). Built on branch `v2-phase1`
+(code + tests; live nodes redeploy separately).
+
+- **F6 — directory updates are pushed when agents change.**
+  Registering an agent, rotating its pack (reconnect), or
+  disconnecting it now enqueues a directory update to every paired
+  peer through the existing outbox. Before this, a peer could not
+  see — or deliver to — an agent registered after pairing until an
+  admin synced by hand, while senders still got a success response
+  for messages that were never delivered.
+- **F3 — pairing codes are 64-bit and burn under attack.** Codes
+  grow from 32-bit (8 hex chars) to 64-bit (16 hex chars, CSPRNG).
+  Failed pairing attempts are counted per source address; after 5
+  failures every outstanding live code is burned, so brute force
+  requires the owner to mint a fresh code. Successful pairing
+  clears the counter and the counter resets on burn, so legitimate
+  first-try pairing is unaffected. Pairing UX is unchanged apart
+  from the longer code.
+- **F2 — secret scanner hardened against obfuscation.** Zero-width
+  characters are stripped before scanning; prefixed tokens are
+  also matched with separator tolerance (a few spaces / tabs /
+  newlines / dots between >=4-char segments), catching split and
+  dot-inserted keys; assignment keywords tolerate a space
+  ("api key:"); password-family assignments are blocked at >=4-char
+  values; base64-looking runs (>=20 chars, including line-wrapped
+  blobs) are decoded and rescanned one level deep, with
+  non-printable decodes ignored so hashes/ids do not false-positive.
+  All eight bypass shapes from the audit are now caught. Known
+  residuals (documented in `agent_mesh/scan.py`): a space-split
+  Bearer token, password values under 4 chars, a token split
+  immediately after its prefix, and separators every 1–3 chars.
+
 ## v2.1.0 — 2026-11-15
 
 Built on branch `v2-phase1` (code + tests; live nodes redeploy

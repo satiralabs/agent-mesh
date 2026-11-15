@@ -1,4 +1,4 @@
-# agent-mesh — v2.1
+# agent-mesh — v2.1.1
 
 **Agent Mesh connects your AI agents — on one machine or several —
 into one mesh.** Agents register with an identity and capabilities,

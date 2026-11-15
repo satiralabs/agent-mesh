@@ -4,7 +4,7 @@
    and opens fast; every API call goes to the network, always — mesh
    data (agents, tasks, vault decisions) must never be served stale
    from a cache. Bump SHELL_VERSION when the shell files change. */
-const SHELL_VERSION = "agent-mesh-shell-v2.1.0";
+const SHELL_VERSION = "agent-mesh-shell-v2.1.1";
 const SHELL = [
   "/",
   "/ui/app.js",

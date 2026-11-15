@@ -402,9 +402,10 @@ class TestVersion(unittest.TestCase):
     def test_version_is_2_0_0(self):
         # __init__ bump happens in the same phase; checked here so the
         # suite fails until every version surface agrees.
-        # (Expectation moved 2.0.0 -> 2.0.1 -> 2.1.0 with each release.)
-        self.assertEqual(MESH_VERSION, "2.1.0")
-        self.assertEqual(SERVER_INFO["version"], "2.1.0")
+        # (Expectation moved 2.0.0 -> 2.0.1 -> 2.1.0 -> 2.1.1 with
+        # each release.)
+        self.assertEqual(MESH_VERSION, "2.1.1")
+        self.assertEqual(SERVER_INFO["version"], "2.1.1")
 
 
 if __name__ == "__main__":

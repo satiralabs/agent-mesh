@@ -504,7 +504,7 @@ class TestReleaseArtifacts(unittest.TestCase):
         with open(os.path.join(ext, "manifest.json")) as fh:
             manifest = json.load(fh)
         self.assertEqual(manifest["manifest_version"], 3)
-        self.assertEqual(manifest["version"], "2.1.0")
+        self.assertEqual(manifest["version"], "2.1.1")
         self.assertEqual(manifest["action"]["default_popup"], "popup.html")
         for name in ("popup.html", "popup.js", "popup.css",
                      "options.html", "options.js", "README.md"):

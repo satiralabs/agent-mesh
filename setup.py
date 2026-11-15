@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="agent-mesh",
-    version="2.1.0",
+    version="2.1.1",
     packages=find_packages(),
     package_data={"agent_mesh": ["handover_rules.md", "web2/*",
                                  "web/*"]},
