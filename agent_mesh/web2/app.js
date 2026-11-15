@@ -118,8 +118,12 @@ function renderAgents() {
        <b>${esc(a.name)}</b><span class="pill ${esc(a.status)}">${esc(a.status)}</span>
        <span class="chip">${esc(a.role)}</span>
        ${a.remote ? `<span class="chip">remote · home ${esc(a.home_node)}</span>` : ""}
+       ${a.status === "revoked" ? `<span class="chip">Revoked</span>` : ""}
        <span class="spacer"></span>
-       ${a.remote ? "" : `<button class="btn small" data-pack="${esc(a.id)}">Connection pack</button>`}
+       ${a.remote ? "" : (a.status === "revoked"
+         ? `<button class="btn small" data-pack="${esc(a.id)}">Reconnect (new pack)</button>`
+         : `<button class="btn small" data-pack="${esc(a.id)}">Connection pack</button>` +
+           `<button class="btn small danger" data-disconnect="${esc(a.id)}">Disconnect</button>`)}
      </div>
      <div class="muted">${esc(a.id)} · ${esc(a.machine || "no machine")} · ` +
      `capabilities: ${esc((a.capabilities || []).join(", ") || "none")} · ` +
@@ -127,11 +131,27 @@ function renderAgents() {
     : '<p class="muted">No agents yet — add the first one below.</p>';
   document.querySelectorAll("[data-pack]").forEach((btn) =>
     btn.addEventListener("click", () => showPack(btn.dataset.pack)));
+  document.querySelectorAll("[data-disconnect]").forEach((btn) =>
+    btn.addEventListener("click", () => disconnectAgent(btn.dataset.disconnect)));
   const opts = state.agents.map((a) =>
     `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("");
   $("task-assignee").innerHTML =
     '<option value="">— choose —</option>' + opts;
   $("message-recipient").innerHTML = opts;
+}
+
+async function disconnectAgent(agentId) {
+  const a = state.agents.find((x) => x.id === agentId);
+  if (!confirm(`Disconnect ${a ? a.name : agentId} from the mesh? ` +
+               "Its token stops working immediately. Its tasks and " +
+               "messages stay visible, and you can reconnect it later " +
+               "with a new pack."))
+    return;
+  try {
+    await api(`/agents/${agentId}/disconnect`, { method: "POST", body: {} });
+    await loadAll();
+    toast("Agent disconnected — its token no longer works.");
+  } catch (e) { toast(e.message, true); }
 }
 
 async function showPack(agentId) {

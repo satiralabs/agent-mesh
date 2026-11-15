@@ -125,6 +125,11 @@ class MeshClient:
     def agent_pack(self, agent_id: str):
         return self._call("POST", f"/agents/{agent_id}/pack", {}, admin=True)
 
+    def disconnect_agent(self, agent_id: str):
+        """Phase 6: admin disconnect — revokes the agent's token."""
+        return self._call("POST", f"/agents/{agent_id}/disconnect", {},
+                          admin=True)
+
     def register_with_pack(self, **kw):
         return self._call("POST", "/agents/pack", kw, admin=True)
 

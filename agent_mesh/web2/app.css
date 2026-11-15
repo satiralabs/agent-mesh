@@ -118,7 +118,7 @@ input[type="checkbox"] { width: auto; }
   text-transform: uppercase; letter-spacing: .4px; }
 .pill.online, .pill.DONE, .pill.allow { background: rgba(16,185,129,.16); color: #34d399; }
 .pill.busy, .pill.IN_PROGRESS, .pill.IN_REVIEW, .pill.needs_approval { background: rgba(245,158,11,.16); color: #fbbf24; }
-.pill.offline, .pill.FAILED, .pill.REJECTED, .pill.deny { background: rgba(244,63,94,.16); color: #fb7185; }
+.pill.offline, .pill.FAILED, .pill.REJECTED, .pill.deny, .pill.revoked { background: rgba(244,63,94,.16); color: #fb7185; }
 .pill.SENT, .pill.ACCEPTED, .pill.DRAFT { background: rgba(6,182,212,.16); color: #22d3ee; }
 .mini-list { display: flex; flex-direction: column; gap: 7px; font-size: 13px; }
 .mini-list .line { display: flex; gap: 9px; flex-wrap: wrap; color: var(--text-muted); }

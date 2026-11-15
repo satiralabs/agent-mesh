@@ -138,7 +138,8 @@ Base: `http://127.0.0.1:<port>` (default port 8790). JSON in/out.
 |---|---|---|
 | `GET /health` | none | `{status: "ok"}` |
 | `POST /agents/register` | admin | returns agent + one-time token |
-| `POST /agents/heartbeat` | agent | body may set `status` |
+| `POST /agents/{id}/disconnect` | admin | Phase 6: revokes the agent — token invalidated (next call `401`), status `revoked`, row + tasks/messages kept, audited as `agent_disconnected`. Reconnect: `POST /agents/{id}/pack` (rotation clears `revoked`; the revoked token stays dead) |
+| `POST /agents/heartbeat` | agent | body may set `status` (never `revoked`) |
 | `GET /agents` | agent or admin | token hashes never returned |
 | `POST /messages`, `GET /messages?recipient=` | agent | recipient defaults to caller |
 | `POST /tasks`, `GET /tasks`, `GET /tasks/{id}` | agent | requester = caller |

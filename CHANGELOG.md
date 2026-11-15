@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.0.1 — 2026-11-15
+
+- Admin disconnect/reconnect of agents (Phase 6): POST
+  /agents/{id}/disconnect revokes an agent — its token stops working
+  immediately (401), it stays listed as 'revoked', its tasks/messages
+  remain admin-readable, and the disconnect is audited. Reconnect via
+  a fresh connection pack (token rotation now also clears the revoked
+  status; the revoked token stays dead). GUI Agents screen gains a
+  Disconnect button (with confirm), a Revoked badge, and a
+  "Reconnect (new pack)" action.
+
 ## v2.0.0 — 2026-11-15
 
 v2 turns the v1 toolkit into a multi-agent mesh: agents on one or

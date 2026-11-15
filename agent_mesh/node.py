@@ -703,6 +703,24 @@ def make_handler(node: Node):
                     token = node.registry.rotate_token(agent_id)
                     pack = build_pack(self._node_url(), agent, token)
                     return self._send(200, {"agent": agent, "pack": pack})
+                if path.startswith("/agents/") and \
+                        path.endswith("/disconnect"):
+                    # Phase 6: admin disconnects (revokes) an agent.
+                    # Its token stops working at once; the agent stays
+                    # listed as 'revoked' and its tasks/messages remain
+                    # readable by admin. Reconnect = a fresh pack.
+                    if not self._require_admin():
+                        return
+                    agent_id = path.split("/")[2]
+                    agent = node.registry.get(agent_id)
+                    if agent is None:
+                        return self._send(404, {"error": "agent not found"})
+                    node.registry.revoke(agent_id)
+                    node.audit_event({
+                        "event": "agent_disconnected", "agent": agent_id,
+                        "outcome": "revoked"})
+                    return self._send(
+                        200, {"agent": node.registry.get(agent_id)})
                 if path == "/agents/heartbeat":
                     agent = self._require_agent()
                     if agent is None:

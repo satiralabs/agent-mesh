@@ -12,7 +12,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 ROLES = ("owner", "orchestrator", "worker")
-STATUSES = ("online", "busy", "offline")
+STATUSES = ("online", "busy", "offline", "revoked")
 
 # Registration without an explicit role defaults to "orchestrator"
 # (Phase 5): in Phases 1-4 ordering was not enforced, so existing
@@ -127,16 +127,36 @@ class Registry:
     def rotate_token(self, agent_id: str) -> Optional[str]:
         """Issue a fresh token for an existing agent (old token stops
         working). Used when generating a new connection pack from the
-        GUI — the pack is the only place the new token appears."""
+        GUI — the pack is the only place the new token appears.
+        Rotating also clears a revoked status (Phase 6 reconnect path):
+        a disconnected agent comes back 'online' with the new token,
+        and the token it was revoked with stays dead."""
         token = secrets.token_urlsafe(32)
         conn = self._conn()
         with conn:
             cur = conn.execute(
-                "UPDATE agents SET token_hash=?, last_seen=? WHERE id=?",
+                "UPDATE agents SET token_hash=?, status='online', "
+                "last_seen=? WHERE id=?",
                 (_hash(token), time.time(), agent_id))
             changed = cur.rowcount
         conn.close()
         return token if changed else None
+
+    def revoke(self, agent_id: str) -> bool:
+        """Disconnect an agent (Phase 6): invalidate its token so every
+        subsequent call with it fails authentication, and mark it
+        'revoked'. The agent row, its tasks and its messages are kept —
+        only its access is cut. Returns False if no such agent."""
+        dead = "revoked:" + _hash(secrets.token_urlsafe(32))
+        conn = self._conn()
+        with conn:
+            cur = conn.execute(
+                "UPDATE agents SET token_hash=?, status='revoked' "
+                "WHERE id=?",
+                (dead, agent_id))
+            changed = cur.rowcount
+        conn.close()
+        return changed > 0
 
     def authenticate(self, token: Optional[str]) -> Optional[Dict[str, Any]]:
         if not token:
@@ -161,8 +181,11 @@ class Registry:
         return [self._public(r) for r in rows]
 
     def heartbeat(self, agent_id: str, status: Optional[str] = None) -> bool:
-        if status is not None and status not in STATUSES:
-            raise ValueError(f"status must be one of {STATUSES}, got {status!r}")
+        if status is not None and (status not in STATUSES
+                                   or status == "revoked"):
+            raise ValueError(
+                "heartbeat status must be online, busy or offline "
+                "('revoked' is set only by an admin disconnect)")
         conn = self._conn()
         with conn:
             if status:
