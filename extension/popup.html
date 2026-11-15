@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <span class="logo">◈</span>
+    <div>
+      <div class="title">Agent Mesh</div>
+      <div id="node-line" class="muted">not configured</div>
+    </div>
+    <span id="reach-dot" class="dot unknown" title="node reachability"></span>
+  </header>
+
+  <section id="stats" class="hidden">
+    <div class="grid">
+      <div class="stat"><span id="count-online" class="num">–</span><span class="lbl">online</span></div>
+      <div class="stat"><span id="count-idle" class="num">–</span><span class="lbl">idle</span></div>
+      <div class="stat"><span id="count-offline" class="num">–</span><span class="lbl">offline</span></div>
+      <div class="stat"><span id="count-approvals" class="num alert">–</span><span class="lbl">approvals waiting</span></div>
+    </div>
+  </section>
+
+  <p id="message" class="muted"></p>
+
+  <footer>
+    <button id="open-gui" class="primary">Open GUI</button>
+    <button id="open-approvals">Open Approvals</button>
+    <button id="open-options" class="ghost">Settings</button>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

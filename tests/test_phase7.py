@@ -450,5 +450,94 @@ class TestPackFormats(unittest.TestCase):
         self.assertEqual(status, 400)
 
 
+# ---------------------------------------------------------------------------
+# E/F/G. Glass GUI, browser extension, PWA + installers (artifacts)
+# ---------------------------------------------------------------------------
+class TestReleaseArtifacts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.node, cls.data_dir, cls.base = start_node("p7-web")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def test_pwa_assets_are_served(self):
+        import urllib.request as u
+        with u.urlopen(self.base + "/manifest.webmanifest",
+                       timeout=5) as resp:
+            manifest = json.loads(resp.read())
+        self.assertEqual(manifest["name"], "Agent Mesh")
+        self.assertEqual(manifest["display"], "standalone")
+        self.assertTrue(manifest["icons"])
+        with u.urlopen(self.base + "/sw.js", timeout=5) as resp:
+            sw = resp.read().decode()
+        self.assertIn("agent-mesh-shell", sw)
+        with u.urlopen(self.base + "/icons/icon-512.png",
+                       timeout=5) as resp:
+            magic = resp.read(8)
+        self.assertEqual(magic[:4], b"\x89PNG")
+        with open(os.path.join(REPO, "agent_mesh", "web2",
+                               "index.html")) as fh:
+            html = fh.read()
+        self.assertIn('rel="manifest"', html)
+        self.assertIn('id="screen-handover"', html)
+        self.assertIn('id="handover-list"', html)
+
+    def test_glass_css_keeps_the_whole_class_contract(self):
+        with open(os.path.join(REPO, "agent_mesh", "web2",
+                               "app.css")) as fh:
+            css = fh.read()
+        self.assertIn("backdrop-filter", css)
+        self.assertIn("radial-gradient", css)
+        # Every class the JS/HTML rely on must still be styled.
+        for cls in (".card", ".row-item", ".pill", ".btn", ".nav-btn",
+                    ".stat-grid", ".chip", ".toast", ".code",
+                    ".login-card", ".form-grid", ".mini-list",
+                    ".board-group", ".task-item", ".inline-form"):
+            self.assertIn(cls, css, cls)
+        # Phone layout survived the redesign.
+        self.assertIn("@media (max-width: 760px)", css)
+
+    def test_browser_extension_is_valid_mv3(self):
+        ext = os.path.join(REPO, "extension")
+        with open(os.path.join(ext, "manifest.json")) as fh:
+            manifest = json.load(fh)
+        self.assertEqual(manifest["manifest_version"], 3)
+        self.assertEqual(manifest["version"], "2.1.0")
+        self.assertEqual(manifest["action"]["default_popup"], "popup.html")
+        for name in ("popup.html", "popup.js", "popup.css",
+                     "options.html", "options.js", "README.md"):
+            self.assertTrue(os.path.exists(os.path.join(ext, name)), name)
+        with open(os.path.join(ext, "popup.js")) as fh:
+            js = fh.read()
+        self.assertIn("/approvals", js)
+        self.assertIn("chrome.storage.local", js)
+        # No hard-coded external endpoints: the only fetch base is the
+        # configured node URL.
+        self.assertNotIn("https://", js.replace("https://*/*", ""))
+
+    def test_installers_exist_and_shell_scripts_parse(self):
+        inst = os.path.join(REPO, "installers")
+        for name in ("install-linux.sh", "install-macos.sh",
+                     "install-windows.ps1", "ANDROID.md"):
+            self.assertTrue(os.path.exists(os.path.join(inst, name)), name)
+        for name in ("install-linux.sh", "install-macos.sh"):
+            proc = subprocess.run(["bash", "-n", os.path.join(inst, name)],
+                                  capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(inst, "install-windows.ps1")) as fh:
+            ps1 = fh.read()
+        self.assertIn("Register-ScheduledTask", ps1)
+        with open(os.path.join(inst, "ANDROID.md")) as fh:
+            android = fh.read()
+        self.assertIn("Termux", android)
+        self.assertIn("Add to Home screen", android)
+        with open(os.path.join(inst, "install-linux.sh")) as fh:
+            linux = fh.read()
+        self.assertIn("systemctl --user", linux)
+        self.assertNotIn("sudo systemctl", linux)
+
+
 if __name__ == "__main__":
     unittest.main()

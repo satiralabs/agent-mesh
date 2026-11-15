@@ -780,3 +780,21 @@ $("login-form").addEventListener("submit", async (ev) => {
     } catch (e) { lock(); }
   }
 })();
+
+/* Deep links (v2.1): #approvals (used by the browser extension's
+   "Open Approvals" button) selects that screen on load. */
+if (location.hash) {
+  const target = document.querySelector(
+    `.nav-btn[data-screen="${location.hash.slice(1)}"]`);
+  if (target) target.click();
+}
+
+/* PWA (v2.1): register the service worker so the GUI is installable
+   (desktop + Android). The worker caches only the app shell; all API
+   traffic stays network-only. Failure is silent — the GUI works the
+   same without it. */
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  });
+}

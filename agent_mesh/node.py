@@ -474,6 +474,18 @@ def make_handler(node: Node):
                 if path == "/ui/app.css":
                     return self._serve_file(WEB2_DIR, "app.css",
                                             "text/css; charset=utf-8")
+                # PWA (v2.1): installable web app — also the Android path.
+                if path == "/manifest.webmanifest":
+                    return self._serve_file(
+                        WEB2_DIR, "manifest.webmanifest",
+                        "application/manifest+json; charset=utf-8")
+                if path == "/sw.js":
+                    return self._serve_file(WEB2_DIR, "sw.js",
+                                            "text/javascript; charset=utf-8")
+                if path.startswith("/icons/") and path.endswith(".png"):
+                    return self._serve_file(
+                        os.path.join(WEB2_DIR, "icons"),
+                        os.path.basename(path), "image/png")
                 if path == "/health":
                     return self._send(200, {"status": "ok"})
                 if path == "/agents":

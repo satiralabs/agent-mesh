@@ -1,0 +1,50 @@
+/* Agent Mesh extension popup — glass look matching the node GUI. */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 300px;
+  padding: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #f1f5f9;
+  background:
+    radial-gradient(300px 200px at 10% 0%, rgba(99,102,241,.5), transparent 60%),
+    radial-gradient(260px 200px at 100% 100%, rgba(6,182,212,.35), transparent 60%),
+    #0b1120;
+}
+header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.logo {
+  width: 32px; height: 32px; border-radius: 9px; flex-shrink: 0;
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; color: #fff;
+}
+.title { font-weight: 700; font-size: 14px; }
+.muted { color: #9fb0c9; font-size: 12px; line-height: 1.45; }
+.dot { width: 10px; height: 10px; border-radius: 50%; margin-left: auto; flex-shrink: 0; }
+.dot.ok { background: #10b981; box-shadow: 0 0 8px rgba(16,185,129,.9); }
+.dot.bad { background: #f43f5e; box-shadow: 0 0 8px rgba(244,63,94,.8); }
+.dot.unknown { background: #64748b; }
+.hidden { display: none !important; }
+.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+.stat {
+  background: rgba(255,255,255,.07);
+  border: 1px solid rgba(255,255,255,.13);
+  border-radius: 12px; padding: 8px 4px;
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+}
+.num { font-size: 19px; font-weight: 800; }
+.num.alert { color: #fda4af; }
+.lbl { font-size: 9.5px; color: #9fb0c9; text-transform: uppercase; letter-spacing: .4px; text-align: center; }
+#message { margin-bottom: 12px; min-height: 16px; }
+footer { display: flex; gap: 7px; }
+button {
+  flex: 1; padding: 8px 6px; border-radius: 9px; cursor: pointer;
+  font-size: 12px; font-weight: 600;
+  background: rgba(255,255,255,.09); color: #f1f5f9;
+  border: 1px solid rgba(255,255,255,.16);
+}
+button.primary {
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  border-color: rgba(129,140,248,.5); color: #fff;
+}
+button.ghost { flex: 0 0 auto; background: transparent; }
+button:disabled { opacity: .45; cursor: default; }

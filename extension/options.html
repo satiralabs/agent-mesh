@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Mesh — settings</title>
+  <link rel="stylesheet" href="popup.css">
+  <style>
+    body { width: auto; max-width: 480px; margin: 24px auto; }
+    form { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+    label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 600; }
+    input {
+      background: rgba(7,11,22,.55); color: #f1f5f9;
+      border: 1px solid rgba(255,255,255,.16); border-radius: 9px;
+      padding: 9px 11px; font-size: 14px;
+    }
+    button { flex: 0 0 auto; padding: 9px 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="logo">◈</span>
+    <div>
+      <div class="title">Agent Mesh — settings</div>
+      <div class="muted">Stored only in this browser (chrome.storage.local).
+        The extension talks to no server except the node below.</div>
+    </div>
+  </header>
+  <form id="opts-form">
+    <label>Node URL
+      <input id="node-url" placeholder="http://127.0.0.1:8790" required>
+    </label>
+    <label>Admin token
+      <input id="admin-token" type="password" autocomplete="off" required>
+    </label>
+    <div>
+      <button type="submit" class="primary">Save</button>
+      <span id="saved" class="muted"></span>
+    </div>
+    <p class="muted">Saving asks the browser for permission to contact
+      that node address — the extension needs it to read node status.
+      Nothing else is requested, and the token is never sent anywhere
+      except as a header to your own node.</p>
+  </form>
+  <script src="options.js"></script>
+</body>
+</html>
