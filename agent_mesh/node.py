@@ -198,6 +198,38 @@ class Node:
                             self._target_role(snap.get("assignee_agent")),
                             snap.get("assignee_capability"))
 
+    # -- v2.2 collaboration --------------------------------------------------
+    @staticmethod
+    def task_involvement(task: Dict[str, Any],
+                         actor_id: str) -> Optional[str]:
+        """How an actor is involved in a task: 'requester', 'lead'
+        (the primary assignee), 'participant' (a collaborator), or
+        None (no involvement — the task is not theirs to see)."""
+        if actor_id == task.get("requester"):
+            return "requester"
+        if task.get("assignee_agent") and \
+                actor_id == task["assignee_agent"]:
+            return "lead"
+        for p in task.get("participants") or []:
+            if p.get("agent_id") == actor_id:
+                return "participant"
+        return None
+
+    def may_transition(self, actor: Dict[str, Any],
+                       task: Dict[str, Any]) -> bool:
+        """Who may drive a task's lifecycle (v2.2): the owner, the
+        requester and the lead assignee — as before. Collaborators may
+        NOT transition (they comment and add progress instead). A task
+        with no named assignee (capability/open task) has no lead yet,
+        so — exactly as before v2.2 — any authenticated agent may move
+        it (that is how an agent picks such a task up)."""
+        if actor["id"] == "owner":
+            return True
+        involvement = self.task_involvement(task, actor["id"])
+        if involvement in ("requester", "lead"):
+            return True
+        return not task.get("assignee_agent")
+
     def read_activity(self, limit: int = 100):
         entries = []
         if os.path.exists(self.audit_path):
@@ -245,13 +277,29 @@ class Node:
             self.enqueue_directory(peer["node_id"])
 
     def sync_task_to_peer(self, task: Dict[str, Any]) -> None:
-        """Queue a snapshot of a federated task for its other node."""
-        target = task.get("home_node") or task.get("origin_node")
-        if not target or target == self.node_id:
-            return
-        self.enqueue_peer(
-            target, "task_sync", {"task": task},
-            f"task:{task['id']}:{task['status']}:{task['updated_at']}")
+        """Queue a snapshot of a federated task for its other node(s).
+
+        Targets: the assignee's home node and the origin node (the
+        classic pair), PLUS — v2.2 — the home node of every remote
+        participant, so a collaborator on a third node sees the task
+        and its thread even when the lead sits on this node. (Relay is
+        star-shaped around the origin: a node that merges a snapshot
+        does not re-forward it, so multi-hop chains converge through
+        the origin node's own syncs.)"""
+        targets = set()
+        for key in ("home_node", "origin_node"):
+            if task.get(key):
+                targets.add(task[key])
+        for p in task.get("participants") or []:
+            remote = self.peers.find_remote_agent(p["agent_id"])
+            if remote:
+                targets.add(remote["home_node"])
+        targets.discard(self.node_id)
+        targets.discard(None)
+        for target in targets:
+            self.enqueue_peer(
+                target, "task_sync", {"task": task},
+                f"task:{task['id']}:{task['status']}:{task['updated_at']}")
 
     def _signed_post(self, peer: Dict[str, Any], path: str,
                      payload: Dict[str, Any]) -> None:
@@ -560,10 +608,17 @@ def make_handler(node: Node):
                     actor = self._require_actor()
                     if actor is None:
                         return
+                    # v2.2 visibility: the owner (admin) sees all; an
+                    # agent's list is scoped to tasks it is involved
+                    # in (requester, lead, or participant).
                     tasks = node.tasks.list_tasks(
                         assignee_agent=qs.get("assignee", [None])[0],
                         requester=qs.get("requester", [None])[0],
-                        status=qs.get("status", [None])[0])
+                        status=qs.get("status", [None])[0],
+                        participant_agent=qs.get("participant",
+                                                 [None])[0],
+                        visible_to=None if node.is_admin(self.headers)
+                        else actor["id"])
                     return self._send(200, {"tasks": tasks})
                 if path.startswith("/tasks/"):
                     actor = self._require_actor()
@@ -572,6 +627,13 @@ def make_handler(node: Node):
                     task = node.tasks.get(path.split("/")[2])
                     if task is None:
                         return self._send(404, {"error": "task not found"})
+                    if not node.is_admin(self.headers) and \
+                            node.task_involvement(task, actor["id"]) \
+                            is None:
+                        return self._send(403, {
+                            "error": "task is not visible to this agent "
+                                     "(not its requester, lead or a "
+                                     "participant)"})
                     return self._send(200, {"task": task})
                 if path == "/vault/services":
                     if not (node.agent_from(self.headers)
@@ -685,7 +747,10 @@ def make_handler(node: Node):
                                     {"title": snap.get("title", ""),
                                      "instructions":
                                          snap.get("instructions", ""),
-                                     "result": snap.get("result")},
+                                     "result": snap.get("result"),
+                                     "comments": "\n".join(
+                                         c.get("body", "") for c in
+                                         snap.get("comments") or [])},
                                     {}, "peer_task"):
                                 return
                             existing = node.tasks.get_by_origin(
@@ -693,6 +758,25 @@ def make_handler(node: Node):
                             if existing is None:
                                 denial = node.check_remote_order(
                                     sender, snap)
+                                # v2.2: collaborators in the snapshot
+                                # must pass the same matrix — being
+                                # added to a task is being tasked.
+                                if denial is None:
+                                    for p in snap.get("participants") \
+                                            or []:
+                                        pid = p.get("agent_id")
+                                        if not pid or pid == \
+                                                snap.get("assignee_agent"):
+                                            continue
+                                        denial = \
+                                            node.check_remote_order(
+                                                sender,
+                                                {**snap,
+                                                 "assignee_agent": pid,
+                                                 "assignee_capability":
+                                                     None})
+                                        if denial:
+                                            break
                                 if denial:
                                     node.audit_event({
                                         "event": "task_order_denied",
@@ -915,6 +999,33 @@ def make_handler(node: Node):
                             "action": "create", "outcome": "denied",
                             "reason": denial})
                         return self._send(403, {"error": denial})
+                    # v2.2: collaborators. Each participant must pass
+                    # the same ordering check as an assignee would —
+                    # being added to a task IS being tasked with part
+                    # of it. The lead and the requester are dropped
+                    # (they are involved by definition).
+                    participants = body.get("participants") or []
+                    if not isinstance(participants, list) or \
+                            any(not isinstance(p, str)
+                                for p in participants):
+                        return self._send(400, {
+                            "error": "participants must be a list of "
+                                     "agent ids"})
+                    clean_participants = []
+                    for pid in participants:
+                        if pid in clean_participants or \
+                                pid == body.get("assignee_agent") or \
+                                pid == actor["id"]:
+                            continue
+                        denial = node.check_order(actor, pid, None)
+                        if denial:
+                            node.audit_event({
+                                "event": "task_order_denied",
+                                "agent": actor["id"], "service": "",
+                                "action": "add_participant",
+                                "outcome": "denied", "reason": denial})
+                            return self._send(403, {"error": denial})
+                        clean_participants.append(pid)
                     if not self._scan_gate(
                             actor["id"], actor.get("role") or "",
                             {"title": body.get("title", ""),
@@ -939,7 +1050,8 @@ def make_handler(node: Node):
                         budget_time_sec=body.get("budget_time_sec"),
                         budget_tokens=body.get("budget_tokens"),
                         budget_money=body.get("budget_money"),
-                        home_node=home_node)
+                        home_node=home_node,
+                        participants=clean_participants)
                     if not duplicate:
                         node.sync_task_to_peer(task)
                     node.audit_event({
@@ -948,10 +1060,105 @@ def make_handler(node: Node):
                         "service": "", "action": "create"})
                     return self._send(200 if duplicate else 201,
                                       {"task": task, "duplicate": duplicate})
+                if path.startswith("/tasks/") and \
+                        path.endswith("/participants"):
+                    # v2.2: add a collaborator. Only the requester or
+                    # the owner (admin) manages a task's roster, and
+                    # the added agent must pass the ordering matrix.
+                    actor = self._require_actor()
+                    if actor is None:
+                        return
+                    task_id = path.split("/")[2]
+                    task = node.tasks.get(task_id)
+                    if task is None:
+                        return self._send(404, {"error": "task not found"})
+                    if actor["id"] != "owner" and \
+                            actor["id"] != task["requester"]:
+                        return self._send(403, {
+                            "error": "only the requester or the owner "
+                                     "may add participants"})
+                    if not body.get("agent_id"):
+                        return self._send(
+                            400, {"error": "agent_id required"})
+                    denial = node.check_order(actor, body["agent_id"],
+                                              None)
+                    if denial:
+                        node.audit_event({
+                            "event": "task_order_denied",
+                            "agent": actor["id"], "service": "",
+                            "action": "add_participant",
+                            "outcome": "denied", "reason": denial})
+                        return self._send(403, {"error": denial})
+                    try:
+                        task = node.tasks.add_participant(
+                            task_id, body["agent_id"], actor["id"])
+                    except InvalidTransition as exc:
+                        return self._send(400, {"error": str(exc)})
+                    node.audit_event({
+                        "event": "task_participant_added",
+                        "agent": actor["id"], "task": task["id"],
+                        "service": "", "action": "add_participant",
+                        "outcome": body["agent_id"]})
+                    node.sync_task_to_peer(task)
+                    return self._send(200, {"task": task})
+                if path.startswith("/tasks/") and \
+                        path.endswith("/comments"):
+                    # v2.2: the shared task thread. Requester, lead
+                    # and participants may comment; nobody else.
+                    actor = self._require_actor()
+                    if actor is None:
+                        return
+                    task_id = path.split("/")[2]
+                    task = node.tasks.get(task_id)
+                    if task is None:
+                        return self._send(404, {"error": "task not found"})
+                    if actor["id"] != "owner" and \
+                            node.task_involvement(task, actor["id"]) \
+                            is None:
+                        return self._send(403, {
+                            "error": "only the requester, the lead or "
+                                     "a participant may comment on "
+                                     "this task"})
+                    if not (body.get("body") or "").strip():
+                        return self._send(
+                            400, {"error": "body required"})
+                    if not self._scan_gate(
+                            actor["id"], actor.get("role") or "",
+                            {"body": body.get("body", "")}, body,
+                            "task_comment"):
+                        return
+                    try:
+                        task = node.tasks.add_comment(
+                            task_id, actor["id"], body["body"])
+                    except KeyError as exc:
+                        return self._send(404, {"error": str(exc)})
+                    except InvalidTransition as exc:
+                        return self._send(400, {"error": str(exc)})
+                    node.audit_event({
+                        "event": "task_comment", "agent": actor["id"],
+                        "task": task["id"], "service": "",
+                        "action": "comment", "outcome": "ok"})
+                    node.sync_task_to_peer(task)
+                    return self._send(201, {"task": task})
                 if path.startswith("/tasks/") and path.endswith("/transition"):
                     actor = self._require_actor()
                     if actor is None:
                         return
+                    existing = node.tasks.get(path.split("/")[2])
+                    if existing is None:
+                        return self._send(404, {"error": "task not found"})
+                    # v2.2: collaborators (and uninvolved agents) may
+                    # not drive the lifecycle of an assigned task.
+                    if not node.may_transition(actor, existing):
+                        node.audit_event({
+                            "event": "task_transition_denied",
+                            "agent": actor["id"], "task": existing["id"],
+                            "service": "", "action": body.get("to", ""),
+                            "outcome": "denied"})
+                        return self._send(403, {
+                            "error": "only the requester, the lead "
+                                     "assignee or the owner may change "
+                                     "this task's status"})
                     if body.get("result") and not self._scan_gate(
                             actor["id"], actor.get("role") or "",
                             {"result": body.get("result")}, body,
@@ -975,6 +1182,18 @@ def make_handler(node: Node):
                     actor = self._require_actor()
                     if actor is None:
                         return
+                    existing = node.tasks.get(path.split("/")[2])
+                    if existing is None:
+                        return self._send(404, {"error": "task not found"})
+                    # v2.2: progress notes are for the involved —
+                    # requester, lead, participants, owner.
+                    if actor["id"] != "owner" and \
+                            node.task_involvement(existing, actor["id"]) \
+                            is None:
+                        return self._send(403, {
+                            "error": "only the requester, the lead or "
+                                     "a participant may add progress "
+                                     "to this task"})
                     if not self._scan_gate(
                             actor["id"], actor.get("role") or "",
                             {"note": body.get("note", "")}, body,
@@ -1154,7 +1373,39 @@ def make_handler(node: Node):
         def do_DELETE(self):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+            body = self._body()
             try:
+                if path.startswith("/tasks/") and \
+                        "/participants/" in path:
+                    # v2.2: remove a collaborator. Requester or owner
+                    # only; the lead cannot be removed (store rule).
+                    actor = self._require_actor()
+                    if actor is None:
+                        return
+                    parts = path.split("/")
+                    task_id, agent_id = parts[2], parts[4]
+                    task = node.tasks.get(task_id)
+                    if task is None:
+                        return self._send(404, {"error": "task not found"})
+                    if actor["id"] != "owner" and \
+                            actor["id"] != task["requester"]:
+                        return self._send(403, {
+                            "error": "only the requester or the owner "
+                                     "may remove participants"})
+                    try:
+                        task = node.tasks.remove_participant(
+                            task_id, agent_id)
+                    except KeyError as exc:
+                        return self._send(404, {"error": str(exc)})
+                    except (InvalidTransition, ValueError) as exc:
+                        return self._send(400, {"error": str(exc)})
+                    node.audit_event({
+                        "event": "task_participant_removed",
+                        "agent": actor["id"], "task": task["id"],
+                        "service": "", "action": "remove_participant",
+                        "outcome": agent_id})
+                    node.sync_task_to_peer(task)
+                    return self._send(200, {"task": task})
                 if path.startswith("/vault/services/") and \
                         "/grants/" in path:
                     # v2.1: owner revokes one sharing grant.
