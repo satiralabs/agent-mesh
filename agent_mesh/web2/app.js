@@ -27,6 +27,9 @@ const agentName = (id) => {
   const a = state.agents.find((x) => x.id === id);
   return a ? a.name : id;
 };
+/* Long ids are shown truncated; the full value rides in title=. */
+const shortId = (id) =>
+  id && id.length > 11 ? id.slice(0, 8) + "…" : (id || "");
 
 function toast(msg, isErr) {
   const t = $("toast");
@@ -111,7 +114,7 @@ function renderHandover() {
          <div class="line"><span>Files</span><span>${esc(e.files || "—")}</span></div>
          <div class="line"><span>Open</span><span>${esc(e.open_items || "—")}</span></div>
        </div></div>`).join("")
-    : '<p class="muted">No entries yet. Agents receive the handover rules automatically when they connect, and file entries with the mesh_handover_log tool or the handover CLI.</p>';
+    : '<p class="muted">No entries yet — agents file them automatically on connect.</p>';
 }
 
 /* ---------- dashboard ---------- */
@@ -156,9 +159,9 @@ function renderAgents() {
          : `<button class="btn small" data-pack="${esc(a.id)}">Connection pack</button>` +
            `<button class="btn small danger" data-disconnect="${esc(a.id)}">Disconnect</button>`)}
      </div>
-     <div class="muted">${esc(a.id)} · ${esc(a.machine || "no machine")} · ` +
-     `capabilities: ${esc((a.capabilities || []).join(", ") || "none")} · ` +
-     `last seen ${esc(fmtTime(a.last_seen))}</div></div>`).join("")
+     <div class="muted"><span title="${esc(a.id)}">${esc(shortId(a.id))}</span> · ${esc(a.machine || "no machine")} · ` +
+     `${esc((a.capabilities || []).join(", ") || "no capabilities")} · ` +
+     `seen ${esc(fmtTime(a.last_seen))}</div></div>`).join("")
     : '<p class="muted">No agents yet — add the first one below.</p>';
   document.querySelectorAll("[data-pack]").forEach((btn) =>
     btn.addEventListener("click", () => showPack(btn.dataset.pack)));
@@ -180,10 +183,8 @@ function renderAgents() {
 
 async function disconnectAgent(agentId) {
   const a = state.agents.find((x) => x.id === agentId);
-  if (!confirm(`Disconnect ${a ? a.name : agentId} from the mesh? ` +
-               "Its token stops working immediately. Its tasks and " +
-               "messages stay visible, and you can reconnect it later " +
-               "with a new pack."))
+  if (!confirm(`Disconnect ${a ? a.name : agentId}? Its token stops ` +
+               "working immediately; tasks and messages stay visible."))
     return;
   try {
     await api(`/agents/${agentId}/disconnect`, { method: "POST", body: {} });
@@ -237,7 +238,7 @@ function participantLine(t) {
   const names = ps.map((p) =>
     `${esc(agentName(p.agent_id))}${p.role === "lead" ? " (lead)" : ""}`
   ).join(", ");
-  return `<div class="muted">Working together: ${names}</div>`;
+  return `<div class="muted">Team: ${names}</div>`;
 }
 
 function renderTasks() {
@@ -443,12 +444,12 @@ function renderVault() {
     return `<div class="row-item"><div class="row-top">
         <b>${esc(name)}</b>
         <span class="chip">${esc(CRED_TYPE_LABELS[s.type] || s.type || "API key")}</span>
-        <span class="chip">secret stored ✓ (never shown)</span>
+        <span class="chip">stored ✓</span>
         ${s.requires_approval ? '<span class="pill needs_approval">approval needed</span>' : ""}
         <span class="spacer"></span>
         <button class="btn small danger" data-vdel="${esc(name)}">Delete</button>
       </div>
-      <div class="muted">${esc(credMetaText(s))} · Broker access: ${esc(aclText)}</div>
+      <div class="muted">${esc(credMetaText(s))} · Access: ${esc(aclText)}</div>
       <div class="mini-list">${grantRows}</div>
       <form class="inline-form" data-share="${esc(name)}">
         <label>Share with agent <select name="agent">${agentOpts}</select></label>
@@ -589,7 +590,7 @@ $("vault-form").addEventListener("submit", async (ev) => {
     $("vault-port").value = "22";
     syncVaultTypeFields();
     await loadAll();
-    toast("Credential saved (encrypted). Now share it or set broker access, below.");
+    toast("Credential saved — share it from its panel below.");
   } catch (e) { toast(e.message, true); }
 });
 
@@ -611,7 +612,7 @@ function renderApprovals() {
   const history = state.approvals.filter((a) => a.status !== "pending").reverse();
   $("approvals-pending").innerHTML = pending.length
     ? pending.map((a) => approvalCard(a, true)).join("")
-    : '<p class="muted">Nothing waiting. When an agent tries to use a gated service, its request lands here.</p>';
+    : '<p class="muted">Nothing waiting.</p>';
   $("approvals-history").innerHTML = history.length
     ? history.map((a) => approvalCard(a, false)).join("")
     : '<p class="muted">No decisions yet.</p>';
@@ -651,7 +652,7 @@ function renderPeers() {
   $("peers-this-node").innerHTML =
     `<div class="line"><span>This node</span><b>${esc(info.name || "")}</b></div>
      <div class="line"><span>Node ID</span><b>${esc(info.node_id || "")}</b></div>
-     <div class="line"><span>Node URL (give this to the other machine)</span><b>${esc(info.url || location.origin)}</b></div>`;
+     <div class="line"><span>Node URL</span><b>${esc(info.url || location.origin)}</b></div>`;
   $("peers-list").innerHTML = state.peers.length ? state.peers.map((p) =>
     `<div class="row-item"><div class="row-top">
        <b>${esc(p.name || p.node_id)}</b>
@@ -659,9 +660,9 @@ function renderPeers() {
        <span class="spacer"></span>
        <button class="btn small" data-psync="${esc(p.node_id)}">Sync directory</button>
      </div>
-     <div class="muted">${esc(p.node_id)} · ${esc(p.url)} · ` +
-     `paired ${esc(fmtTime(p.paired_at))} · last seen ${esc(fmtTime(p.last_seen))}</div></div>`).join("")
-    : '<p class="muted">No paired machines yet — pair the first one above.</p>';
+     <div class="muted"><span title="${esc(p.node_id)}">${esc(shortId(p.node_id))}</span> · ${esc(p.url)} · ` +
+     `paired ${esc(fmtTime(p.paired_at))} · seen ${esc(fmtTime(p.last_seen))}</div></div>`).join("")
+    : '<p class="muted">No paired machines yet.</p>';
   document.querySelectorAll("[data-psync]").forEach((btn) =>
     btn.addEventListener("click", async () => {
       try {
@@ -842,6 +843,24 @@ $("login-form").addEventListener("submit", async (ev) => {
     $("login-error").textContent = "That token was not accepted by the node.";
   }
 });
+
+/* Token deep link (v2.2.1): #token=<admin token> — used by the
+   browser extension and for screenshots/automation. The token is
+   stored in sessionStorage and the fragment is stripped at once, so
+   it never lingers in the address bar or history. A bare screen name
+   in the same fragment (#token=…&tasks) is kept for the deep-link
+   handler below. */
+(function () {
+  const h = location.hash.slice(1);
+  if (!h.includes("token=")) return;
+  const parts = h.split("&");
+  const tp = parts.find((p) => p.startsWith("token="));
+  if (!tp) return;
+  sessionStorage.setItem(TOKEN_KEY, decodeURIComponent(tp.slice(6)));
+  const rest = parts.filter((p) => p !== tp).join("&");
+  history.replaceState(null, "", location.pathname + location.search +
+    (rest ? "#" + rest : ""));
+})();
 
 (async () => {
   if (sessionStorage.getItem(TOKEN_KEY)) {

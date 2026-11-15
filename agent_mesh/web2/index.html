@@ -17,11 +17,9 @@
   <!-- Login: admin token, kept only in sessionStorage -->
   <div id="login-screen" class="login-wrap">
     <form id="login-form" class="card login-card">
-      <div class="brand-icon big">◈</div>
+      <div class="brand-icon big"><img src="/icons/icon-512.png" alt="Agent Mesh"></div>
       <h1>Agent Mesh</h1>
-      <p class="muted">Enter the node admin token to open the control centre.
-        It is kept only in this browser tab's session storage — never saved
-        to disk.</p>
+      <p class="muted">Node admin token — kept only in this tab.</p>
       <label>Admin token
         <input type="password" id="login-token" autocomplete="off" required>
       </label>
@@ -33,11 +31,8 @@
   <div id="app" class="app hidden">
     <aside>
       <div class="brand">
-        <div class="brand-icon">◈</div>
-        <div>
-          <div class="brand-title">Agent Mesh</div>
-          <div class="brand-subtitle">Control Centre</div>
-        </div>
+        <div class="brand-icon"><img src="/icons/icon-512.png" alt=""></div>
+        <div class="brand-title">Agent Mesh</div>
       </div>
       <nav id="main-nav">
         <button class="nav-btn active" data-screen="dashboard"><span class="icon">▦</span>Dashboard</button>
@@ -69,7 +64,7 @@
         <div class="stat-grid">
           <div class="card stat"><span class="stat-num" id="stat-agents-online">–</span><span class="stat-label">Agents online</span></div>
           <div class="card stat"><span class="stat-num" id="stat-agents-busy">–</span><span class="stat-label">Agents busy</span></div>
-          <div class="card stat"><span class="stat-num" id="stat-agents-offline">–</span><span class="stat-label">Agents idle / offline</span></div>
+          <div class="card stat"><span class="stat-num" id="stat-agents-offline">–</span><span class="stat-label">Idle / offline</span></div>
           <div class="card stat"><span class="stat-num" id="stat-tasks-open">–</span><span class="stat-label">Open tasks</span></div>
           <div class="card stat"><span class="stat-num" id="stat-approvals">–</span><span class="stat-label">Pending approvals</span></div>
         </div>
@@ -86,16 +81,12 @@
       <!-- 2. Agents -->
       <section id="screen-agents" class="screen">
         <div class="card">
-          <h3>Agents</h3>
           <div id="agents-list"></div>
         </div>
         <div class="card">
-          <h3>Add an agent</h3>
+          <h3>Add agent</h3>
           <form id="agent-form" class="form-grid">
             <label>Name <input id="agent-name" required placeholder="e.g. Successor (VPS)"></label>
-            <label>Machine <input id="agent-machine" placeholder="e.g. Blitz VPS"></label>
-            <label>Capabilities (comma separated)
-              <input id="agent-caps" placeholder="coding, research, browser"></label>
             <label>Role
               <select id="agent-role">
                 <option value="worker">worker</option>
@@ -103,13 +94,17 @@
                 <option value="owner">owner</option>
               </select>
             </label>
+            <details class="more-options">
+              <summary>More options</summary>
+              <label>Machine <input id="agent-machine" placeholder="e.g. Blitz VPS"></label>
+              <label>Capabilities (comma separated)
+                <input id="agent-caps" placeholder="coding, research, browser"></label>
+            </details>
             <button type="submit" class="btn primary">Add agent &amp; make connection pack</button>
           </form>
           <div id="pack-panel" class="hidden">
-            <h4>Connection pack — paste this into the agent's MCP config</h4>
-            <p class="muted">The agent's token appears only inside this pack.
-              Treat it like a password. Making a new pack for an existing
-              agent replaces its old token.</p>
+            <h4>Connection pack</h4>
+            <p class="muted" title="Paste this into the agent's MCP config. Making a new pack replaces the agent's old token.">Paste into the agent's MCP config — it contains the agent's token, treat it like a password.</p>
             <pre id="pack-text" class="code"></pre>
             <button id="pack-copy" class="btn">Copy pack</button>
           </div>
@@ -119,21 +114,24 @@
       <!-- 3. Tasks -->
       <section id="screen-tasks" class="screen">
         <div class="card">
-          <h3>Create a task (order an agent)</h3>
+          <h3>New task</h3>
           <form id="task-form" class="form-grid">
             <label>Title <input id="task-title" required></label>
             <label>Instructions <textarea id="task-instructions" rows="3"></textarea></label>
-            <label>Assign to agent <select id="task-assignee"></select></label>
-            <label>…or to a capability <input id="task-capability" placeholder="e.g. research"></label>
-            <label>Participants — agents who work on it together
-              <span id="task-participants" class="check-list"></span>
-            </label>
-            <label>Priority
-              <select id="task-priority">
-                <option>low</option><option selected>normal</option>
-                <option>high</option><option>urgent</option>
-              </select>
-            </label>
+            <label>Assignee <select id="task-assignee"></select></label>
+            <details class="more-options">
+              <summary>More options</summary>
+              <label>…or assign to a capability <input id="task-capability" placeholder="e.g. research"></label>
+              <label>Participants
+                <span id="task-participants" class="check-list"></span>
+              </label>
+              <label>Priority
+                <select id="task-priority">
+                  <option>low</option><option selected>normal</option>
+                  <option>high</option><option>urgent</option>
+                </select>
+              </label>
+            </details>
             <button type="submit" class="btn primary">Create &amp; send task</button>
           </form>
         </div>
@@ -144,21 +142,23 @@
       <!-- 4. Messages -->
       <section id="screen-messages" class="screen">
         <div class="card">
-          <h3>Send a message (as owner)</h3>
+          <h3>New message</h3>
           <form id="message-form" class="form-grid">
-            <label>To agent <select id="message-recipient"></select></label>
-            <label>Type
-              <select id="message-type">
-                <option>INFO</option><option>QUESTION</option>
-                <option>ANSWER</option><option>HANDOVER_OFFER</option>
-              </select>
-            </label>
+            <label>To <select id="message-recipient"></select></label>
             <label>Message <textarea id="message-text" rows="3" required></textarea></label>
+            <details class="more-options">
+              <summary>More options</summary>
+              <label>Type
+                <select id="message-type">
+                  <option>INFO</option><option>QUESTION</option>
+                  <option>ANSWER</option><option>HANDOVER_OFFER</option>
+                </select>
+              </label>
+            </details>
             <button type="submit" class="btn primary">Send</button>
           </form>
         </div>
         <div class="card">
-          <h3>Recent messages</h3>
           <div id="messages-list"></div>
         </div>
       </section>
@@ -166,15 +166,14 @@
       <!-- 5. Vault -->
       <section id="screen-vault" class="screen">
         <div class="card">
-          <h3>Add a service credential</h3>
-          <p class="muted">The secret is written once, encrypted by the node,
-            and never shown again — not here, not to any agent.</p>
+          <h3>Add credential</h3>
+          <p class="muted">Encrypted by the node, never shown again.</p>
           <form id="vault-form" class="form-grid">
             <label>Service name <input id="vault-name" required placeholder="e.g. shipd"></label>
-            <label>Credential type
+            <label>Type
               <select id="vault-type">
                 <option value="api_key">API key</option>
-                <option value="login">Account login (username + password)</option>
+                <option value="login">Account login</option>
                 <option value="ssh">SSH (key or password)</option>
                 <option value="oauth_token">OAuth token</option>
                 <option value="generic">Generic secret</option>
@@ -194,16 +193,9 @@
             <label class="check"><input type="checkbox" id="vault-gated"> Every use needs my approval</label>
             <button type="submit" class="btn primary">Save credential</button>
           </form>
-          <p class="muted">Sharing: after saving, use the credential's
-            Share panel below. <b>Use</b> mode is brokered — the agent
-            gets connection details only, never the secret.
-            <b>Reveal</b> mode hands the agent the secret value and
-            always needs your approval per use, unless you mark the
-            grant as a standing reveal. Every reveal is written to the
-            audit log.</p>
+          <p class="muted" title="Use mode is brokered: the agent gets connection details only, never the secret. Reveal mode hands the agent the secret and needs your approval per use unless the grant is a standing reveal. Every reveal is audit-logged.">Share from each service's panel below — Use is brokered, Reveal hands over the secret.</p>
         </div>
         <div class="card">
-          <h3>Services</h3>
           <div id="vault-list"></div>
         </div>
       </section>
@@ -211,7 +203,7 @@
       <!-- 6. Approvals -->
       <section id="screen-approvals" class="screen">
         <div class="card">
-          <h3>Waiting for your decision</h3>
+          <h3>Pending</h3>
           <div id="approvals-pending"></div>
         </div>
         <div class="card">
@@ -223,8 +215,6 @@
       <!-- 7. Activity -->
       <section id="screen-activity" class="screen">
         <div class="card">
-          <h3>Audit trail</h3>
-          <p class="muted">Vault use, approvals and task events. Secrets never appear here.</p>
           <div id="activity-list"></div>
         </div>
       </section>
@@ -232,12 +222,7 @@
       <!-- 8. Handover -->
       <section id="screen-handover" class="screen">
         <div class="card">
-          <h3>Handover entries</h3>
-          <p class="muted">One entry per agent session, filed by the
-            agents themselves (MCP tool, CLI, or API). The node keeps
-            them all and maintains an exported
-            <code>HANDOVER-&lt;node&gt;.md</code> in its data folder.
-            Rules version: <b id="handover-rules-version">–</b></p>
+          <p class="muted" title="One entry per agent session, filed by the agents themselves (MCP tool, CLI, or API). The node also maintains an exported HANDOVER-<node>.md in its data folder.">Filed by agents, one per session · Rules <b id="handover-rules-version">–</b></p>
           <div id="handover-list"></div>
         </div>
       </section>
@@ -251,15 +236,10 @@
           <button id="settings-lock" class="btn">Lock (forget admin token on this tab)</button>
         </div>
         <div class="card">
-          <h3>Peers — other machines in your mesh</h3>
+          <h3>Peers</h3>
           <div id="peers-this-node" class="mini-list"></div>
           <h4>Pair a new machine</h4>
-          <p class="muted">Two ways, same result: generate a one-time code
-            here and enter it on the other machine, or generate the code
-            on the other machine and enter its URL + code below. Codes
-            expire in 15 minutes and work once. Pair only over a network
-            you trust (your LAN or Tailscale) — pairing hands over the
-            shared secret that signs all traffic between the two nodes.</p>
+          <p class="muted" title="Generate a code here and enter it on the other machine, or enter the other machine's URL + code below. Pairing hands over the shared secret that signs all traffic between the two nodes.">One-time code, expires in 15 minutes — pair only over a trusted network (LAN or Tailscale).</p>
           <form id="pair-code-form" class="inline-form">
             <button class="btn" type="submit">Generate a pairing code</button>
             <span id="pair-code-out" class="muted"></span>
@@ -278,9 +258,7 @@
         </div>
         <div class="card">
           <h3>Desktop app</h3>
-          <p class="muted">A Tauri desktop wrapper for this exact GUI lives
-            in the repo under <code>desktop/</code> — see
-            <code>desktop/DESKTOP.md</code> for build commands per OS.</p>
+          <p class="muted">Tauri wrapper in <code>desktop/</code> — build steps in <code>desktop/DESKTOP.md</code>.</p>
         </div>
       </section>
     </main>
