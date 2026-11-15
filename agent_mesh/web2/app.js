@@ -89,10 +89,14 @@ function renderAll() {
 
 /* ---------- dashboard ---------- */
 function renderDashboard() {
-  const by = (s) => state.agents.filter((a) => a.status === s).length;
+  // v2.1: counts use COMPUTED presence (from last_seen), not the
+  // stored status flag, which went stale silently.
+  const pres = (a) => a.presence || a.status;
+  const by = (s) => state.agents.filter((a) => pres(a) === s).length;
   $("stat-agents-online").textContent = by("online");
-  $("stat-agents-busy").textContent = by("busy");
-  $("stat-agents-offline").textContent = by("offline");
+  $("stat-agents-busy").textContent =
+    state.agents.filter((a) => a.status === "busy" && pres(a) === "online").length;
+  $("stat-agents-offline").textContent = by("idle") + by("offline");
   const open = state.tasks.filter(
     (t) => !["DONE", "FAILED", "REJECTED"].includes(t.status)).length;
   $("stat-tasks-open").textContent = open;
@@ -115,7 +119,7 @@ function renderDashboard() {
 function renderAgents() {
   $("agents-list").innerHTML = state.agents.length ? state.agents.map((a) =>
     `<div class="row-item"><div class="row-top">
-       <b>${esc(a.name)}</b><span class="pill ${esc(a.status)}">${esc(a.status)}</span>
+       <b>${esc(a.name)}</b><span class="pill ${esc(a.presence || a.status)}">${esc(a.presence || a.status)}</span>${a.status === "busy" && (a.presence || "online") === "online" ? ' <span class="pill busy">busy</span>' : ""}
        <span class="chip">${esc(a.role)}</span>
        ${a.remote ? `<span class="chip">remote · home ${esc(a.home_node)}</span>` : ""}
        ${a.status === "revoked" ? `<span class="chip">Revoked</span>` : ""}
@@ -309,6 +313,19 @@ $("message-form").addEventListener("submit", async (ev) => {
 });
 
 /* ---------- vault ---------- */
+const CRED_TYPE_LABELS = { api_key: "API key", login: "Login",
+  ssh: "SSH", oauth_token: "OAuth token", generic: "Generic" };
+
+function credMetaText(s) {
+  const m = s.meta || {};
+  if (s.type === "login")
+    return `user ${m.username || "—"} · ${m.url || s.upstream || "—"}`;
+  if (s.type === "ssh")
+    return `${m.user || "—"}@${m.host || "—"}:${m.port || 22}`;
+  if (m.label) return m.label;
+  return s.upstream || "—";
+}
+
 function renderVault() {
   const names = Object.keys(state.services);
   $("vault-list").innerHTML = names.length ? names.map((name) => {
@@ -317,14 +334,31 @@ function renderVault() {
       `${agentName(a)}: ${acts.join("/")}`).join(" · ") || "no agent allowed yet";
     const agentOpts = state.agents.map((a) =>
       `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("");
+    const grants = Object.entries(s.grants || {});
+    const grantRows = grants.length ? grants.map(([a, g]) =>
+      `<div class="line"><span>Shared with</span><b>${esc(agentName(a))}</b>` +
+      `<span class="chip">${esc(g.mode)}${g.standing_reveal ? " · standing reveal" : ""}</span>` +
+      `<button class="btn small danger" data-unshare="${esc(name)}|${esc(a)}">Stop sharing</button></div>`).join("")
+      : '<div class="line"><span class="muted">Not shared with any agent yet.</span></div>';
     return `<div class="row-item"><div class="row-top">
         <b>${esc(name)}</b>
+        <span class="chip">${esc(CRED_TYPE_LABELS[s.type] || s.type || "API key")}</span>
         <span class="chip">secret stored ✓ (never shown)</span>
         ${s.requires_approval ? '<span class="pill needs_approval">approval needed</span>' : ""}
         <span class="spacer"></span>
         <button class="btn small danger" data-vdel="${esc(name)}">Delete</button>
       </div>
-      <div class="muted">Upstream: ${esc(s.upstream || "—")} · Who may use it: ${esc(aclText)}</div>
+      <div class="muted">${esc(credMetaText(s))} · Broker access: ${esc(aclText)}</div>
+      <div class="mini-list">${grantRows}</div>
+      <form class="inline-form" data-share="${esc(name)}">
+        <label>Share with agent <select name="agent">${agentOpts}</select></label>
+        <label>Mode <select name="mode">
+          <option value="use">use — brokered, secret never shown</option>
+          <option value="reveal">reveal — agent receives the secret</option>
+        </select></label>
+        <label class="check"><input type="checkbox" name="standing"> standing reveal (no per-use approval)</label>
+        <button class="btn small" type="submit">Share</button>
+      </form>
       <form class="inline-form" data-acl="${esc(name)}">
         <label>Agent <select name="agent">${agentOpts}</select></label>
         <span class="checks">
@@ -371,6 +405,30 @@ function renderVault() {
       } catch (e) { toast(e.message, true); }
     }));
 
+  document.querySelectorAll("[data-share]").forEach((form) =>
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const name = form.dataset.share;
+      try {
+        await api(`/vault/services/${name}/grants`, { method: "POST", body: {
+          agent_id: form.agent.value, mode: form.mode.value,
+          standing_reveal: form.standing.checked } });
+        await loadAll();
+        toast(`Shared ${name} (${form.mode.value} mode).`);
+      } catch (e) { toast(e.message, true); }
+    }));
+
+  document.querySelectorAll("[data-unshare]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      const [name, agentId] = btn.dataset.unshare.split("|");
+      if (!confirm(`Stop sharing "${name}" with ${agentName(agentId)}?`)) return;
+      try {
+        await api(`/vault/services/${name}/grants/${agentId}`,
+                  { method: "DELETE" });
+        await loadAll(); toast("Sharing stopped for " + name + ".");
+      } catch (e) { toast(e.message, true); }
+    }));
+
   document.querySelectorAll("[data-check]").forEach((form) =>
     form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
@@ -390,16 +448,48 @@ function renderVault() {
     }));
 }
 
+/* Credential-type field switching: only the fields that belong to
+   the chosen type are shown, and the secret box is relabelled. */
+const VAULT_TYPE_FIELDS = {
+  api_key: { show: [], secret: "Secret / API key" },
+  oauth_token: { show: [], secret: "OAuth token" },
+  generic: { show: [], secret: "Secret value" },
+  login: { show: ["vault-fields-login"], secret: "Password" },
+  ssh: { show: ["vault-fields-ssh"], secret: "Private key or password" },
+};
+function syncVaultTypeFields() {
+  const type = $("vault-type").value;
+  ["vault-fields-login", "vault-fields-ssh"].forEach((id) =>
+    $(id).classList.toggle("hidden",
+      !(VAULT_TYPE_FIELDS[type] || {}).show.includes(id)));
+  $("vault-secret-label").textContent =
+    (VAULT_TYPE_FIELDS[type] || {}).secret || "Secret";
+}
+$("vault-type").addEventListener("change", syncVaultTypeFields);
+syncVaultTypeFields();
+
 $("vault-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
+  const type = $("vault-type").value;
+  const meta = {};
+  if (type === "login") {
+    meta.username = $("vault-username").value;
+    meta.url = $("vault-login-url").value;
+  } else if (type === "ssh") {
+    meta.host = $("vault-host").value;
+    meta.user = $("vault-ssh-user").value;
+    meta.port = parseInt($("vault-port").value || "22", 10);
+  }
   try {
     await api("/vault/services", { method: "POST", body: {
       service: $("vault-name").value, upstream: $("vault-upstream").value,
-      secret: $("vault-secret").value,
+      secret: $("vault-secret").value, type, meta,
       requires_approval: $("vault-gated").checked, acl: {} } });
     ev.target.reset();
+    $("vault-port").value = "22";
+    syncVaultTypeFields();
     await loadAll();
-    toast("Credential saved (encrypted). Now set who may use it, below.");
+    toast("Credential saved (encrypted). Now share it or set broker access, below.");
   } catch (e) { toast(e.message, true); }
 });
 

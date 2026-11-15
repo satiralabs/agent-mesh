@@ -31,6 +31,20 @@ except Exception:  # pragma: no cover - depends on environment
 ACTIONS = ("read", "write", "spend")
 _PBKDF2_ROUNDS = 600_000
 
+# Credential types (v2.1). A "service" is any shared credential; its
+# type decides which fields are metadata (listable, never secret) and
+# what a brokered `use` may hand back:
+#   api_key / oauth_token — secret is the key/token; upstream is meta.
+#   login                 — secret is the password; username+url meta.
+#   ssh                   — secret is the key or password; host/user/
+#                           port are meta.
+#   generic               — secret is opaque; a label is meta.
+# In `use` mode the secret NEVER leaves the node for any type: login /
+# ssh uses return only the non-secret connection details, api uses are
+# brokered by the node's existing use-check flow.
+CRED_TYPES = ("api_key", "login", "ssh", "oauth_token", "generic")
+GRANT_MODES = ("use", "reveal")
+
 
 def _b64e(raw: bytes) -> str:
     return base64.b64encode(raw).decode()
@@ -138,26 +152,38 @@ class Vault:
     # -- services --------------------------------------------------------
     def set_service(self, service: str, secret: str, upstream: str = "",
                     acl: Optional[Dict[str, Any]] = None,
-                    requires_approval: bool = False) -> None:
+                    requires_approval: bool = False,
+                    cred_type: str = "api_key",
+                    meta: Optional[Dict[str, Any]] = None) -> None:
+        if cred_type not in CRED_TYPES:
+            raise ValueError(
+                f"unknown credential type {cred_type!r}; "
+                f"allowed {CRED_TYPES}")
         clean_acl: Dict[str, Any] = {}
         for agent_id, actions in (acl or {}).items():
             bad = [a for a in actions if a not in ACTIONS]
             if bad:
                 raise ValueError(f"unknown actions {bad}; allowed {ACTIONS}")
             clean_acl[agent_id] = list(actions)
+        previous = self._data["services"].get(service, {})
         self._data["services"][service] = {
             "upstream": upstream,
             "acl": clean_acl,
             "requires_approval": bool(requires_approval),
             "ciphertext": self._encrypt(secret),
+            "type": cred_type,
+            "meta": dict(meta or {}),
+            # Re-saving a credential keeps its sharing grants.
+            "grants": previous.get("grants", {}),
         }
         self._save()
 
     def update_service(self, service: str, acl: Optional[Dict[str, Any]] = None,
                        requires_approval: Optional[bool] = None,
-                       upstream: Optional[str] = None) -> None:
-        """Change a service's ACL / approval flag / upstream WITHOUT
-        touching its stored secret (GUI ACL editor path)."""
+                       upstream: Optional[str] = None,
+                       meta: Optional[Dict[str, Any]] = None) -> None:
+        """Change a service's ACL / approval flag / upstream / metadata
+        WITHOUT touching its stored secret (GUI ACL editor path)."""
         cfg = self._data["services"].get(service)
         if cfg is None:
             raise KeyError(f"service not found: {service}")
@@ -174,6 +200,8 @@ class Vault:
             cfg["requires_approval"] = bool(requires_approval)
         if upstream is not None:
             cfg["upstream"] = upstream
+        if meta is not None:
+            cfg["meta"] = dict(meta)
         self._save()
 
     def delete_service(self, service: str) -> bool:
@@ -193,9 +221,52 @@ class Vault:
             name: {"upstream": cfg.get("upstream", ""),
                    "acl": cfg.get("acl", {}),
                    "requires_approval": cfg.get("requires_approval", False),
-                   "has_secret": True}
+                   "has_secret": True,
+                   # v2.1: type + non-secret metadata + sharing grants
+                   # are listable; secret values never are.
+                   "type": cfg.get("type", "api_key"),
+                   "meta": cfg.get("meta", {}),
+                   "grants": cfg.get("grants", {})}
             for name, cfg in self._data["services"].items()
         }
+
+    # -- sharing grants (v2.1) --------------------------------------------
+    def set_grant(self, service: str, agent_id: str, mode: str,
+                  standing_reveal: bool = False) -> Dict[str, Any]:
+        """Owner grants one agent use of one credential. mode 'use' =
+        brokered (the secret never leaves the node); mode 'reveal' =
+        the agent may receive the secret value, per-use approved unless
+        the grant is marked standing_reveal."""
+        cfg = self._data["services"].get(service)
+        if cfg is None:
+            raise KeyError(f"service not found: {service}")
+        if mode not in GRANT_MODES:
+            raise ValueError(
+                f"grant mode must be one of {GRANT_MODES}, got {mode!r}")
+        grant = {"mode": mode,
+                 "standing_reveal": bool(standing_reveal)
+                 if mode == "reveal" else False}
+        cfg.setdefault("grants", {})[agent_id] = grant
+        self._save()
+        return grant
+
+    def remove_grant(self, service: str, agent_id: str) -> bool:
+        cfg = self._data["services"].get(service)
+        if cfg is None:
+            raise KeyError(f"service not found: {service}")
+        grants = cfg.setdefault("grants", {})
+        if agent_id not in grants:
+            return False
+        del grants[agent_id]
+        self._save()
+        return True
+
+    def get_grant(self, service: str,
+                  agent_id: str) -> Optional[Dict[str, Any]]:
+        cfg = self._data["services"].get(service)
+        if cfg is None:
+            return None
+        return cfg.get("grants", {}).get(agent_id)
 
     # -- broker check ----------------------------------------------------
     def audit(self, agent: str, service: str, action: str, outcome: str) -> None:
@@ -223,3 +294,69 @@ class Vault:
             outcome = "allow"
         self.audit(agent_id, service, action, outcome)
         return outcome
+
+    # -- credential sharing (v2.1) -----------------------------------------
+    def credential_use(self, agent_id: str, service: str) -> Dict[str, Any]:
+        """Brokered use of a shared credential under a `use` grant.
+
+        The secret NEVER leaves the node: api credentials are used
+        through the node's broker flow (this returns the decision plus
+        the non-secret upstream), and login / ssh credentials return
+        only their non-secret connection details (host, user, url,
+        port) so the agent knows where to connect — the password / key
+        itself is never in the response. Always audited."""
+        cfg = self._data["services"].get(service)
+        grant = self.get_grant(service, agent_id)
+        if cfg is None or grant is None or grant.get("mode") != "use":
+            self.audit(agent_id, service, "use", "deny")
+            return {"outcome": "deny", "service": service}
+        cred_type = cfg.get("type", "api_key")
+        meta = cfg.get("meta", {})
+        out: Dict[str, Any] = {"outcome": "allow", "service": service,
+                               "type": cred_type, "mode": "use"}
+        if cred_type == "login":
+            out["username"] = meta.get("username", "")
+            out["url"] = meta.get("url", "") or cfg.get("upstream", "")
+        elif cred_type == "ssh":
+            out["host"] = meta.get("host", "")
+            out["user"] = meta.get("user", "")
+            out["port"] = meta.get("port", 22)
+        elif cred_type in ("api_key", "oauth_token"):
+            out["upstream"] = cfg.get("upstream", "")
+            out["note"] = ("brokered by the node: present this decision "
+                           "to the node's broker flow; the key itself "
+                           "never leaves the node")
+        else:  # generic
+            out["label"] = meta.get("label", "")
+            out["note"] = ("brokered by the node; the stored value "
+                           "never leaves the node in use mode")
+        self.audit(agent_id, service, "use", "allow")
+        return out
+
+    def reveal(self, agent_id: str, service: str) -> Dict[str, Any]:
+        """Hand the secret value to an agent holding a `reveal` grant.
+
+        Per-use approval is required unless the grant is standing.
+        Approval uses the same one-shot ApprovalStore as gated service
+        uses, with action 'reveal': an approved, unconsumed request
+        lets exactly one reveal through, then it re-gates. EVERY
+        reveal attempt is audit-logged (agent, credential name,
+        outcome — never the value)."""
+        cfg = self._data["services"].get(service)
+        grant = self.get_grant(service, agent_id)
+        if cfg is None or grant is None or grant.get("mode") != "reveal":
+            self.audit(agent_id, service, "reveal", "deny")
+            return {"outcome": "deny", "service": service}
+        if grant.get("standing_reveal"):
+            self.audit(agent_id, service, "reveal", "allow_standing")
+            return {"outcome": "allow", "service": service,
+                    "type": cfg.get("type", "api_key"),
+                    "secret": self._decrypt(cfg["ciphertext"])}
+        if self.approvals is not None and self.approvals.consume_approved(
+                agent_id, service, "reveal"):
+            self.audit(agent_id, service, "reveal", "allow_approved")
+            return {"outcome": "allow", "service": service,
+                    "type": cfg.get("type", "api_key"),
+                    "secret": self._decrypt(cfg["ciphertext"])}
+        self.audit(agent_id, service, "reveal", "needs_approval")
+        return {"outcome": "needs_approval", "service": service}

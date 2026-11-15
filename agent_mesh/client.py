@@ -104,6 +104,35 @@ class MeshClient:
     def vault_delete_service(self, service: str):
         return self._call("DELETE", f"/vault/services/{service}", admin=True)
 
+    # vault credential sharing (v2.1)
+    def vault_grant(self, service: str, agent_id: str, mode: str,
+                    standing_reveal: bool = False):
+        return self._call("POST", f"/vault/services/{service}/grants",
+                          {"agent_id": agent_id, "mode": mode,
+                           "standing_reveal": standing_reveal}, admin=True)
+
+    def vault_revoke_grant(self, service: str, agent_id: str):
+        return self._call("DELETE",
+                          f"/vault/services/{service}/grants/{agent_id}",
+                          admin=True)
+
+    def vault_credential_use(self, service: str):
+        return self._call("POST", "/vault/credential-use",
+                          {"service": service})
+
+    def vault_reveal(self, service: str):
+        return self._call("POST", "/vault/reveal", {"service": service})
+
+    # handover (v2.1)
+    def handover_rules(self):
+        return self._call("GET", "/handover/rules")
+
+    def handover_log(self, **kw):
+        return self._call("POST", "/handover/entries", kw)
+
+    def handover_entries(self):
+        return self._call("GET", "/handover/entries")
+
     # approvals (Phase 3)
     def approvals_list(self, status: Optional[str] = None):
         q = f"?status={status}" if status else ""

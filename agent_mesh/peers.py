@@ -19,6 +19,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from .registry import presence_state
+
 TS_WINDOW_SEC = 300  # reject peer requests whose timestamp is older
 DEFAULT_CODE_TTL_SEC = 900  # pairing codes live at most 15 minutes
 DEFAULT_RETRY_SCHEDULE = (1.0, 5.0, 15.0, 60.0)
@@ -139,6 +141,15 @@ class PeerStore:
                     machine TEXT NOT NULL DEFAULT '',
                     updated_at REAL NOT NULL
                 )""")
+            # v2.1 migration: carry the ORIGIN node's last_seen for each
+            # remote agent. Before this, remote_agents() reported the
+            # local sync time as last_seen, so every remote agent looked
+            # freshly online after every directory sync.
+            cols = [r[1] for r in conn.execute(
+                "PRAGMA table_info(remote_agents)").fetchall()]
+            if "last_seen" not in cols:
+                conn.execute(
+                    "ALTER TABLE remote_agents ADD COLUMN last_seen REAL")
         conn.close()
 
     # -- pairing codes ----------------------------------------------------
@@ -305,14 +316,19 @@ class PeerStore:
             conn.execute("DELETE FROM remote_agents WHERE home_node=?",
                          (home_node,))
             for a in agents:
+                # Keep the origin node's own last_seen for this agent;
+                # fall back to the sync time only if the sender did not
+                # provide one (older peer).
+                origin_seen = a.get("last_seen")
                 conn.execute(
                     "INSERT INTO remote_agents (agent_id,home_node,name,"
-                    "capabilities,role,status,machine,updated_at) VALUES "
-                    "(?,?,?,?,?,?,?,?)",
+                    "capabilities,role,status,machine,updated_at,last_seen)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
                     (a["id"], home_node, a.get("name", ""),
                      json.dumps(a.get("capabilities", [])),
                      a.get("role", "worker"), a.get("status", "online"),
-                     a.get("machine", ""), now))
+                     a.get("machine", ""), now,
+                     float(origin_seen) if origin_seen else now))
         conn.close()
 
     def remote_agents(self) -> List[Dict[str, Any]]:
@@ -320,12 +336,18 @@ class PeerStore:
         rows = conn.execute(
             "SELECT * FROM remote_agents ORDER BY name").fetchall()
         conn.close()
-        return [{"id": r["agent_id"], "name": r["name"],
-                 "capabilities": json.loads(r["capabilities"]),
-                 "role": r["role"], "status": r["status"],
-                 "machine": r["machine"], "node": r["home_node"],
-                 "home_node": r["home_node"], "remote": True,
-                 "last_seen": r["updated_at"]} for r in rows]
+        out = []
+        for r in rows:
+            seen = r["last_seen"] if r["last_seen"] is not None \
+                else r["updated_at"]
+            out.append({"id": r["agent_id"], "name": r["name"],
+                        "capabilities": json.loads(r["capabilities"]),
+                        "role": r["role"], "status": r["status"],
+                        "presence": presence_state(seen, r["status"]),
+                        "machine": r["machine"], "node": r["home_node"],
+                        "home_node": r["home_node"], "remote": True,
+                        "last_seen": seen})
+        return out
 
     def find_remote_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
         for a in self.remote_agents():

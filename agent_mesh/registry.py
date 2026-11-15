@@ -20,6 +20,34 @@ STATUSES = ("online", "busy", "offline", "revoked")
 # matrix below bites as soon as an agent is EXPLICITLY a worker.
 DEFAULT_ROLE = "orchestrator"
 
+# Presence (v2.1): an agent's liveness is COMPUTED from last_seen, never
+# trusted from the stored status flag — a stored "online" went stale
+# silently (an agent showed "connected" when it had never connected).
+# online < 120s, idle < 15 min, offline otherwise. "revoked" (an admin
+# disconnect) always wins over the clock.
+ONLINE_WITHIN_SEC = 120.0
+IDLE_WITHIN_SEC = 900.0
+
+
+def presence_state(last_seen: float, status: Optional[str] = None,
+                   now: Optional[float] = None) -> str:
+    """Pure presence computation: 'online' | 'idle' | 'offline' |
+    'revoked'. Boundary rule: exactly 120s old is already idle, exactly
+    900s old is already offline."""
+    if status == "revoked":
+        return "revoked"
+    if now is None:
+        now = time.time()
+    try:
+        age = now - float(last_seen or 0)
+    except (TypeError, ValueError):
+        return "offline"
+    if age < ONLINE_WITHIN_SEC:
+        return "online"
+    if age < IDLE_WITHIN_SEC:
+        return "idle"
+    return "offline"
+
 
 def order_denial(requester_id: str, requester_role: str,
                  assignee_agent: str = None,
@@ -100,6 +128,7 @@ class Registry:
             "id": row["id"], "name": row["name"], "machine": row["machine"],
             "node": row["node"], "capabilities": json.loads(row["capabilities"]),
             "role": row["role"], "status": row["status"],
+            "presence": presence_state(row["last_seen"], row["status"]),
             "created_at": row["created_at"], "last_seen": row["last_seen"],
         }
 

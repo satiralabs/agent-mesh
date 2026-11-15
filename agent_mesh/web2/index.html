@@ -61,7 +61,7 @@
         <div class="stat-grid">
           <div class="card stat"><span class="stat-num" id="stat-agents-online">–</span><span class="stat-label">Agents online</span></div>
           <div class="card stat"><span class="stat-num" id="stat-agents-busy">–</span><span class="stat-label">Agents busy</span></div>
-          <div class="card stat"><span class="stat-num" id="stat-agents-offline">–</span><span class="stat-label">Agents offline</span></div>
+          <div class="card stat"><span class="stat-num" id="stat-agents-offline">–</span><span class="stat-label">Agents idle / offline</span></div>
           <div class="card stat"><span class="stat-num" id="stat-tasks-open">–</span><span class="stat-label">Open tasks</span></div>
           <div class="card stat"><span class="stat-num" id="stat-approvals">–</span><span class="stat-label">Pending approvals</span></div>
         </div>
@@ -160,11 +160,36 @@
             and never shown again — not here, not to any agent.</p>
           <form id="vault-form" class="form-grid">
             <label>Service name <input id="vault-name" required placeholder="e.g. shipd"></label>
+            <label>Credential type
+              <select id="vault-type">
+                <option value="api_key">API key</option>
+                <option value="login">Account login (username + password)</option>
+                <option value="ssh">SSH (key or password)</option>
+                <option value="oauth_token">OAuth token</option>
+                <option value="generic">Generic secret</option>
+              </select>
+            </label>
             <label>Upstream URL <input id="vault-upstream" placeholder="https://api.example.com"></label>
-            <label>Secret / API key <input type="password" id="vault-secret" required autocomplete="off"></label>
+            <div id="vault-fields-login" class="hidden">
+              <label>Username <input id="vault-username" autocomplete="off" placeholder="e.g. susan@example.com"></label>
+              <label>Login page URL <input id="vault-login-url" placeholder="https://example.com/login"></label>
+            </div>
+            <div id="vault-fields-ssh" class="hidden">
+              <label>Host <input id="vault-host" autocomplete="off" placeholder="e.g. vps.example.com"></label>
+              <label>SSH user <input id="vault-ssh-user" autocomplete="off" placeholder="e.g. root"></label>
+              <label>SSH port <input id="vault-port" type="number" value="22" min="1" max="65535"></label>
+            </div>
+            <label><span id="vault-secret-label">Secret / API key</span> <input type="password" id="vault-secret" required autocomplete="off"></label>
             <label class="check"><input type="checkbox" id="vault-gated"> Every use needs my approval</label>
             <button type="submit" class="btn primary">Save credential</button>
           </form>
+          <p class="muted">Sharing: after saving, use the credential's
+            Share panel below. <b>Use</b> mode is brokered — the agent
+            gets connection details only, never the secret.
+            <b>Reveal</b> mode hands the agent the secret value and
+            always needs your approval per use, unless you mark the
+            grant as a standing reveal. Every reveal is written to the
+            audit log.</p>
         </div>
         <div class="card">
           <h3>Services</h3>

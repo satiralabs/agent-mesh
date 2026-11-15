@@ -862,9 +862,63 @@ def make_handler(node: Node):
                         body["service"], body["secret"],
                         upstream=body.get("upstream", ""),
                         acl=body.get("acl", {}),
-                        requires_approval=bool(body.get("requires_approval")))
+                        requires_approval=bool(body.get("requires_approval")),
+                        cred_type=body.get("type", "api_key"),
+                        meta=body.get("meta", {}))
                     return self._send(201, {"services":
                                             node.vault.list_services_safe()})
+                if path.startswith("/vault/services/") and \
+                        path.endswith("/grants"):
+                    # v2.1: owner shares one credential with one agent.
+                    if not self._require_admin():
+                        return
+                    service = path.split("/")[3]
+                    if not body.get("agent_id") or not body.get("mode"):
+                        return self._send(
+                            400, {"error": "agent_id and mode required"})
+                    try:
+                        grant = node.vault.set_grant(
+                            service, body["agent_id"], body["mode"],
+                            standing_reveal=bool(
+                                body.get("standing_reveal")))
+                    except KeyError as exc:
+                        return self._send(404, {"error": str(exc)})
+                    node.audit_event({
+                        "event": "vault_grant_set", "agent": "owner",
+                        "service": service, "action": "grant",
+                        "outcome": body["mode"],
+                        "grantee": body["agent_id"]})
+                    return self._send(200, {
+                        "grant": grant,
+                        "services": node.vault.list_services_safe()})
+                if path == "/vault/credential-use":
+                    # v2.1 brokered use: connection details only, the
+                    # secret never leaves the node.
+                    agent = self._require_agent()
+                    if agent is None:
+                        return
+                    if not body.get("service"):
+                        return self._send(400, {"error": "service required"})
+                    out = node.vault.credential_use(agent["id"],
+                                                    body["service"])
+                    code = 403 if out["outcome"] == "deny" else 200
+                    return self._send(code, out)
+                if path == "/vault/reveal":
+                    # v2.1 reveal: the ONLY endpoint that returns a
+                    # secret value, and only under a reveal grant —
+                    # per-use approved, or standing. All audited.
+                    agent = self._require_agent()
+                    if agent is None:
+                        return
+                    if not body.get("service"):
+                        return self._send(400, {"error": "service required"})
+                    out = node.vault.reveal(agent["id"], body["service"])
+                    if out["outcome"] == "needs_approval":
+                        approval, _created = node.approvals.request(
+                            agent["id"], body["service"], "reveal")
+                        out["approval_id"] = approval["id"]
+                    code = 403 if out["outcome"] == "deny" else 200
+                    return self._send(code, out)
                 if path == "/vault/use-check":
                     agent = node.agent_from(self.headers)
                     if agent is not None:
@@ -940,7 +994,8 @@ def make_handler(node: Node):
                         node.vault.update_service(
                             service, acl=body.get("acl"),
                             requires_approval=body.get("requires_approval"),
-                            upstream=body.get("upstream"))
+                            upstream=body.get("upstream"),
+                            meta=body.get("meta"))
                     except KeyError as exc:
                         return self._send(404, {"error": str(exc)})
                     node.audit_event({
@@ -959,6 +1014,25 @@ def make_handler(node: Node):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
             try:
+                if path.startswith("/vault/services/") and \
+                        "/grants/" in path:
+                    # v2.1: owner revokes one sharing grant.
+                    if not self._require_admin():
+                        return
+                    parts = path.split("/")
+                    service, agent_id = parts[3], parts[5]
+                    try:
+                        removed = node.vault.remove_grant(service, agent_id)
+                    except KeyError as exc:
+                        return self._send(404, {"error": str(exc)})
+                    if not removed:
+                        return self._send(404, {"error": "grant not found"})
+                    node.audit_event({
+                        "event": "vault_grant_removed", "agent": "owner",
+                        "service": service, "action": "grant",
+                        "outcome": "removed", "grantee": agent_id})
+                    return self._send(
+                        200, {"services": node.vault.list_services_safe()})
                 if path.startswith("/vault/services/"):
                     if not self._require_admin():
                         return
