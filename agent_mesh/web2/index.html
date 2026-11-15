@@ -200,12 +200,30 @@
           <button id="settings-lock" class="btn">Lock (forget admin token on this tab)</button>
         </div>
         <div class="card">
-          <h3>Connecting another machine (Phase 4)</h3>
-          <p class="muted">Cross-machine pairing arrives in Phase 4: each
-            machine will run its own node, show a pairing code / QR here,
-            and you approve it on a machine already in your mesh. Until
-            then, this node serves agents on this machine and any agent
-            that can reach this node's URL with its own token.</p>
+          <h3>Peers — other machines in your mesh</h3>
+          <div id="peers-this-node" class="mini-list"></div>
+          <h4>Pair a new machine</h4>
+          <p class="muted">Two ways, same result: generate a one-time code
+            here and enter it on the other machine, or generate the code
+            on the other machine and enter its URL + code below. Codes
+            expire in 15 minutes and work once. Pair only over a network
+            you trust (your LAN or Tailscale) — pairing hands over the
+            shared secret that signs all traffic between the two nodes.</p>
+          <form id="pair-code-form" class="inline-form">
+            <button class="btn" type="submit">Generate a pairing code</button>
+            <span id="pair-code-out" class="muted"></span>
+          </form>
+          <form id="pair-form" class="form-grid">
+            <label>Other node's URL <input id="pair-url" required placeholder="http://100.x.y.z:8790"></label>
+            <label>Pairing code from that node <input id="pair-code" required autocomplete="off"></label>
+            <button type="submit" class="btn primary">Pair with that machine</button>
+          </form>
+          <h4>Paired machines</h4>
+          <div id="peers-list"></div>
+          <div class="inline-form">
+            <span id="outbox-counts" class="muted"></span>
+            <button id="outbox-flush" class="btn small">Send queued items now</button>
+          </div>
         </div>
         <div class="card">
           <h3>Desktop app</h3>

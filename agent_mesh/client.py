@@ -123,3 +123,27 @@ class MeshClient:
 
     def register_with_pack(self, **kw):
         return self._call("POST", "/agents/pack", kw, admin=True)
+
+    # peers / federation (Phase 4, admin)
+    def node_info(self):
+        return self._call("GET", "/node/info", admin=True)
+
+    def pairing_code(self):
+        return self._call("POST", "/peers/pairing-code", {}, admin=True)
+
+    def pair_with(self, peer_url: str, code: str):
+        return self._call("POST", "/peers/pair",
+                          {"peer_url": peer_url, "code": code}, admin=True)
+
+    def peers_list(self):
+        return self._call("GET", "/peers", admin=True)
+
+    def peer_sync(self, peer_node_id: str):
+        return self._call("POST", f"/peers/{peer_node_id}/sync", {},
+                          admin=True)
+
+    def peers_flush(self):
+        return self._call("POST", "/peers/flush", {}, admin=True)
+
+    def peers_outbox(self):
+        return self._call("GET", "/peers/outbox", admin=True)

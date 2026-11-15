@@ -16,12 +16,15 @@ so the GUI needs no separate agent token.
 import argparse
 import json
 import os
+import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-from . import bus
+from . import bus, peers as peers_mod
 from .approvals import ApprovalStore
 from .pack import build_pack
 from .registry import Registry
@@ -34,9 +37,21 @@ OWNER = {"id": "owner", "name": "Owner", "role": "owner",
          "capabilities": [], "status": "online", "machine": "", "node": ""}
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
 class Node:
     def __init__(self, data_dir: str, admin_token: str,
-                 master_passphrase: Optional[str] = None):
+                 master_passphrase: Optional[str] = None,
+                 node_name: Optional[str] = None,
+                 public_url: Optional[str] = None,
+                 flush_interval: Optional[float] = None,
+                 retry_schedule=None, code_ttl: Optional[float] = None,
+                 max_attempts: Optional[int] = None):
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
         self.admin_token = admin_token
@@ -50,6 +65,24 @@ class Node:
         self.approvals = ApprovalStore(
             os.path.join(data_dir, "approvals.db"), audit_path=self.audit_path)
         self.vault.approvals = self.approvals
+        # Phase 4 federation.
+        self.identity = peers_mod.load_identity(
+            data_dir, name=node_name or os.environ.get("AGENT_MESH_NODE_NAME"))
+        self.node_id = self.identity["node_id"]
+        self.peers = peers_mod.PeerStore(os.path.join(data_dir, "peers.db"))
+        self.public_url = (public_url
+                           or os.environ.get("AGENT_MESH_PUBLIC_URL") or "")
+        self.flush_interval = flush_interval if flush_interval is not None \
+            else _env_float("AGENT_MESH_FLUSH_SEC", 2.0)
+        self.retry_schedule = retry_schedule if retry_schedule is not None \
+            else peers_mod.parse_schedule(
+                os.environ.get("AGENT_MESH_RETRY_SCHEDULE"))
+        self.code_ttl = code_ttl if code_ttl is not None else _env_float(
+            "AGENT_MESH_PAIR_TTL_SEC", peers_mod.DEFAULT_CODE_TTL_SEC)
+        self.max_attempts = max_attempts if max_attempts is not None \
+            else int(_env_float("AGENT_MESH_OUTBOX_MAX_ATTEMPTS",
+                                peers_mod.DEFAULT_MAX_ATTEMPTS))
+        self._flush_stop = threading.Event()
 
     # -- auth helpers ----------------------------------------------------
     def agent_from(self, headers) -> Optional[Dict[str, Any]]:
@@ -86,6 +119,115 @@ class Node:
                     except Exception:
                         continue
         return entries[-limit:][::-1]
+
+    # -- Phase 4 federation -------------------------------------------------
+    def all_agents(self):
+        local = [dict(a, home_node=self.node_id, remote=False)
+                 for a in self.registry.list_agents()]
+        return local + self.peers.remote_agents()
+
+    def enqueue_peer(self, peer_node_id: str, kind: str,
+                     payload: Dict[str, Any], dedupe_key: str) -> None:
+        self.peers.enqueue(peer_node_id, kind, payload, dedupe_key)
+
+    def enqueue_directory(self, peer_node_id: str) -> None:
+        # Dedupe by content hash: re-syncing an unchanged directory is a
+        # no-op, a changed one queues a fresh delivery.
+        import hashlib
+        agents = self.registry.list_agents()
+        digest = hashlib.sha256(json.dumps(
+            agents, sort_keys=True).encode()).hexdigest()[:16]
+        self.enqueue_peer(peer_node_id, "directory",
+                          {"node_id": self.node_id,
+                           "name": self.identity["name"], "agents": agents},
+                          f"directory:{digest}")
+
+    def sync_task_to_peer(self, task: Dict[str, Any]) -> None:
+        """Queue a snapshot of a federated task for its other node."""
+        target = task.get("home_node") or task.get("origin_node")
+        if not target or target == self.node_id:
+            return
+        self.enqueue_peer(
+            target, "task_sync", {"task": task},
+            f"task:{task['id']}:{task['status']}:{task['updated_at']}")
+
+    def _signed_post(self, peer: Dict[str, Any], path: str,
+                     payload: Dict[str, Any]) -> None:
+        body = json.dumps(payload).encode()
+        ts = str(int(time.time()))
+        sig = peers_mod.sign(peer["secret"], ts, "POST", path, body)
+        req = urllib.request.Request(peer["url"] + path, data=body,
+                                     method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-Mesh-Node", self.node_id)
+        req.add_header("X-Mesh-Timestamp", ts)
+        req.add_header("X-Mesh-Signature", sig)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status >= 300:
+                raise RuntimeError(f"peer returned HTTP {resp.status}")
+
+    def flush_outbox_once(self) -> Dict[str, int]:
+        delivered = failed = 0
+        for item in self.peers.due_items():
+            peer = self.peers.get_peer(item["peer_node_id"])
+            if peer is None:
+                self.peers.mark_attempt(item["id"], "peer record missing",
+                                        self.retry_schedule,
+                                        self.max_attempts)
+                failed += 1
+                continue
+            path = {"directory": "/peer/directory",
+                    "task_sync": "/peer/task_sync",
+                    "message": "/peer/message"}.get(item["kind"])
+            try:
+                if path is None:
+                    raise RuntimeError(f"unknown outbox kind {item['kind']}")
+                self._signed_post(peer, path, item["payload"])
+                self.peers.mark_delivered(item["id"])
+                self.peers.touch_peer(peer["peer_node_id"])
+                delivered += 1
+            except Exception as exc:
+                self.peers.mark_attempt(item["id"], str(exc),
+                                        self.retry_schedule,
+                                        self.max_attempts)
+                failed += 1
+        return {"delivered": delivered, "failed": failed,
+                "counts": self.peers.outbox_counts()}
+
+    def flush_loop(self) -> None:
+        while not self._flush_stop.wait(self.flush_interval):
+            try:
+                self.flush_outbox_once()
+            except Exception:
+                pass  # the loop must never die on one bad pass
+
+    def pair_with(self, peer_url: str, code: str) -> Dict[str, Any]:
+        """Initiator side of pairing: call the peer's /peer/pair with our
+        identity and the one-time code its admin generated. On success
+        both nodes hold the same per-peer secret."""
+        peer_url = peer_url.rstrip("/")
+        body = json.dumps({"node_id": self.node_id,
+                           "name": self.identity["name"],
+                           "url": self.public_url,
+                           "code": code}).encode()
+        req = urllib.request.Request(peer_url + "/peer/pair", data=body,
+                                     method="POST")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                out = json.loads(resp.read() or b"{}")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")[:200]
+            raise ValueError(
+                f"pairing refused by peer (HTTP {exc.code}): {detail}")
+        self.peers.add_peer(out["node_id"], out.get("name", ""), peer_url,
+                            out["peer_secret"])
+        self.enqueue_directory(out["node_id"])
+        self.audit_event({"event": "peer_paired", "agent": "owner",
+                          "service": out["node_id"], "action": "pair",
+                          "outcome": "ok"})
+        return {"node_id": out["node_id"], "name": out.get("name", ""),
+                "url": peer_url, "status": "paired"}
 
 
 def _static_file(directory: str, name: str):
@@ -125,11 +267,40 @@ def make_handler(node: Node):
         def _body(self) -> Dict[str, Any]:
             length = int(self.headers.get("Content-Length") or 0)
             if not length:
+                self._raw = b""
                 return {}
+            self._raw = self.rfile.read(length)
             try:
-                return json.loads(self.rfile.read(length) or b"{}")
+                return json.loads(self._raw or b"{}")
             except Exception:
                 return {}
+
+        def _verify_peer(self, path: str):
+            """HMAC peer auth for /peer/* (except /peer/pair, which is
+            authenticated by the one-time pairing code). Returns the peer
+            record, or None after sending 401/403. Peer credentials are
+            valid ONLY here — they never satisfy agent/admin auth."""
+            sender = self.headers.get("X-Mesh-Node", "")
+            peer = node.peers.get_peer(sender) if sender else None
+            if peer is None:
+                self._send(403, {"error": "unknown peer node"})
+                return None
+            ts = self.headers.get("X-Mesh-Timestamp", "")
+            try:
+                fresh = abs(time.time() - int(ts)) \
+                    <= peers_mod.TS_WINDOW_SEC
+            except ValueError:
+                fresh = False
+            if not fresh:
+                self._send(401, {"error": "stale or missing timestamp"})
+                return None
+            sig = self.headers.get("X-Mesh-Signature", "")
+            if not peers_mod.verify(peer["secret"], sig, ts, "POST", path,
+                                    getattr(self, "_raw", b"")):
+                self._send(401, {"error": "bad peer signature"})
+                return None
+            node.peers.touch_peer(sender)
+            return peer
 
         def _require_agent(self):
             agent = node.agent_from(self.headers)
@@ -179,7 +350,27 @@ def make_handler(node: Node):
                     if not (node.agent_from(self.headers)
                             or node.is_admin(self.headers)):
                         return self._send(401, {"error": "unauthenticated"})
-                    return self._send(200, {"agents": node.registry.list_agents()})
+                    return self._send(200, {"agents": node.all_agents()})
+                if path == "/node/info":
+                    if not (node.agent_from(self.headers)
+                            or node.is_admin(self.headers)):
+                        return self._send(401, {"error": "unauthenticated"})
+                    return self._send(200, {
+                        "node_id": node.node_id,
+                        "name": node.identity["name"],
+                        "url": node.public_url})
+                if path == "/peers":
+                    if not self._require_admin():
+                        return
+                    return self._send(
+                        200, {"peers": node.peers.list_peers_safe(),
+                              "outbox": node.peers.outbox_counts()})
+                if path == "/peers/outbox":
+                    if not self._require_admin():
+                        return
+                    return self._send(200, {
+                        "counts": node.peers.outbox_counts(),
+                        "items": node.peers.outbox_recent(50)})
                 if path == "/messages":
                     actor = self._require_actor()
                     if actor is None:
@@ -241,6 +432,104 @@ def make_handler(node: Node):
             path = parsed.path.rstrip("/") or "/"
             body = self._body()
             try:
+                # -- Phase 4 peer endpoints -------------------------------
+                if path == "/peer/pair":
+                    # Authenticated by the one-time pairing code itself.
+                    if not node.peers.consume_code(body.get("code", "")):
+                        return self._send(
+                            403, {"error": "invalid, expired or already "
+                                           "used pairing code"})
+                    if not body.get("node_id") or not body.get("url"):
+                        return self._send(
+                            400, {"error": "node_id and url required"})
+                    import secrets as _secrets
+                    peer_secret = _secrets.token_urlsafe(32)
+                    node.peers.add_peer(body["node_id"],
+                                        body.get("name", ""), body["url"],
+                                        peer_secret)
+                    node.enqueue_directory(body["node_id"])
+                    node.audit_event({
+                        "event": "peer_paired", "agent": "owner",
+                        "service": body["node_id"], "action": "pair",
+                        "outcome": "ok"})
+                    # The secret is returned exactly once, over this
+                    # pairing response, to the initiating node only.
+                    return self._send(200, {
+                        "node_id": node.node_id,
+                        "name": node.identity["name"],
+                        "peer_secret": peer_secret})
+                if path.startswith("/peer/"):
+                    peer = self._verify_peer(path)
+                    if peer is None:
+                        return
+                    sender = peer["peer_node_id"]
+                    if path == "/peer/ping":
+                        return self._send(
+                            200, {"ok": True, "node_id": node.node_id})
+                    if path == "/peer/directory":
+                        node.peers.set_remote_agents(
+                            sender, body.get("agents", []))
+                        node.audit_event({
+                            "event": "peer_directory", "agent": sender,
+                            "service": "", "action": "sync",
+                            "outcome": f"{len(body.get('agents', []))} agents"})
+                        return self._send(200, {"ok": True})
+                    if path == "/peer/task_sync":
+                        snap = body.get("task") or {}
+                        if snap.get("origin_node") == node.node_id \
+                                and snap.get("origin_task_id"):
+                            task = node.tasks.apply_remote_state(snap)
+                        else:
+                            task = node.tasks.upsert_federated(snap, sender)
+                        return self._send(
+                            200, {"ok": True,
+                                  "task_id": task["id"] if task else None})
+                    if path == "/peer/message":
+                        msg = body.get("message") or {}
+                        dedupe = msg.get("correlation_id") or ""
+                        if dedupe and bus.message_exists(
+                                dedupe, db_path=node.bus_db):
+                            return self._send(
+                                200, {"ok": True, "duplicate": True})
+                        msg_id = bus.send_message(
+                            sender=msg.get("sender", sender),
+                            recipient=msg.get("recipient", ""),
+                            msg_type=msg.get("msg_type", "INFO"),
+                            payload=msg.get("payload", ""),
+                            correlation_id=dedupe or None,
+                            db_path=node.bus_db)
+                        return self._send(200, {"ok": True, "id": msg_id})
+                    return self._send(404, {"error": "not found"})
+                # -- Phase 4 admin peer endpoints -------------------------
+                if path == "/peers/pairing-code":
+                    if not self._require_admin():
+                        return
+                    code, expires = node.peers.create_code(node.code_ttl)
+                    return self._send(201, {"code": code,
+                                            "expires_at": expires})
+                if path == "/peers/pair":
+                    if not self._require_admin():
+                        return
+                    if not body.get("peer_url") or not body.get("code"):
+                        return self._send(
+                            400, {"error": "peer_url and code required"})
+                    try:
+                        peer = node.pair_with(body["peer_url"], body["code"])
+                    except Exception as exc:
+                        return self._send(400, {"error": str(exc)})
+                    return self._send(201, {"peer": peer})
+                if path == "/peers/flush":
+                    if not self._require_admin():
+                        return
+                    return self._send(200, node.flush_outbox_once())
+                if path.startswith("/peers/") and path.endswith("/sync"):
+                    if not self._require_admin():
+                        return
+                    peer_id = path.split("/")[2]
+                    if node.peers.get_peer(peer_id) is None:
+                        return self._send(404, {"error": "peer not found"})
+                    node.enqueue_directory(peer_id)
+                    return self._send(200, {"ok": True})
                 if path == "/agents/register":
                     if not self._require_admin():
                         return
@@ -289,12 +578,26 @@ def make_handler(node: Node):
                     if not body.get("recipient") or not body.get("msg_type"):
                         return self._send(400, {"error": "recipient and "
                                                         "msg_type required"})
+                    corr = body.get("correlation_id") \
+                        or f"{node.node_id}:msg:{int(time.time()*1000)}:" \
+                           f"{actor['id']}"
                     msg_id = bus.send_message(
                         sender=actor["id"], recipient=body["recipient"],
                         msg_type=body["msg_type"],
                         payload=body.get("payload", ""),
-                        correlation_id=body.get("correlation_id"),
+                        correlation_id=corr,
                         db_path=node.bus_db)
+                    remote = node.peers.find_remote_agent(body["recipient"])
+                    if remote:
+                        node.enqueue_peer(
+                            remote["home_node"], "message",
+                            {"message": {
+                                "sender": actor["id"],
+                                "recipient": body["recipient"],
+                                "msg_type": body["msg_type"],
+                                "payload": body.get("payload", ""),
+                                "correlation_id": corr}},
+                            f"message:{corr}")
                     return self._send(201, {"id": msg_id})
                 if path == "/tasks":
                     actor = self._require_actor()
@@ -302,6 +605,12 @@ def make_handler(node: Node):
                         return
                     if not body.get("title"):
                         return self._send(400, {"error": "title required"})
+                    home_node = None
+                    if body.get("assignee_agent"):
+                        remote = node.peers.find_remote_agent(
+                            body["assignee_agent"])
+                        if remote:
+                            home_node = remote["home_node"]
                     task, duplicate = node.tasks.create(
                         title=body["title"], requester=actor["id"],
                         instructions=body.get("instructions", ""),
@@ -313,7 +622,10 @@ def make_handler(node: Node):
                         idempotency_key=body.get("idempotency_key"),
                         budget_time_sec=body.get("budget_time_sec"),
                         budget_tokens=body.get("budget_tokens"),
-                        budget_money=body.get("budget_money"))
+                        budget_money=body.get("budget_money"),
+                        home_node=home_node)
+                    if not duplicate:
+                        node.sync_task_to_peer(task)
                     node.audit_event({
                         "event": "task_created", "agent": actor["id"],
                         "task": task["id"], "outcome": task["status"],
@@ -336,6 +648,7 @@ def make_handler(node: Node):
                         "event": "task_transition", "agent": actor["id"],
                         "task": task["id"], "outcome": task["status"],
                         "service": "", "action": body.get("to", "")})
+                    node.sync_task_to_peer(task)
                     return self._send(200, {"task": task})
                 if path.startswith("/tasks/") and path.endswith("/progress"):
                     actor = self._require_actor()
@@ -349,6 +662,7 @@ def make_handler(node: Node):
                         return self._send(404, {"error": str(exc)})
                     except InvalidTransition as exc:
                         return self._send(400, {"error": str(exc)})
+                    node.sync_task_to_peer(task)
                     return self._send(200, {"task": task})
                 if path == "/vault/services":
                     if not self._require_admin():
@@ -479,6 +793,10 @@ def make_handler(node: Node):
 def serve(node: Node, host: str = "127.0.0.1", port: int = 8790):
     server = ThreadingHTTPServer((host, port), make_handler(node))
     server.daemon_threads = True
+    if not node.public_url:
+        node.public_url = f"http://{host}:{server.server_address[1]}"
+    threading.Thread(target=node.flush_loop, daemon=True,
+                     name="mesh-outbox-flush").start()
     return server
 
 
@@ -489,14 +807,21 @@ def main(argv=None) -> int:
                         default=int(os.environ.get("AGENT_MESH_PORT", "8790")))
     parser.add_argument("--data-dir", default=os.environ.get(
         "AGENT_MESH_DATA", os.path.expanduser("~/.agent-mesh-node")))
+    parser.add_argument("--name", default=None,
+                        help="this node's display name (default: "
+                             "AGENT_MESH_NODE_NAME or 'unnamed node')")
+    parser.add_argument("--url", default=None,
+                        help="public URL peers should use to reach this "
+                             "node (default: http://<host>:<port>)")
     args = parser.parse_args(argv)
     admin = os.environ.get("AGENT_MESH_ADMIN")
     if not admin:
         raise SystemExit("AGENT_MESH_ADMIN must be set (node admin token)")
-    node = Node(args.data_dir, admin_token=admin)
+    node = Node(args.data_dir, admin_token=admin, node_name=args.name,
+                public_url=args.url)
     server = serve(node, args.host, args.port)
-    print(f"agent-mesh node on http://{args.host}:{args.port} "
-          f"(data: {args.data_dir})")
+    print(f"agent-mesh node {node.node_id} ({node.identity['name']}) on "
+          f"{node.public_url} (data: {args.data_dir})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

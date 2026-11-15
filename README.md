@@ -239,7 +239,7 @@ clicks. (The v1 broker page is still served, at `/v1`.)
 | **Vault** | Add a credential (write-only — it is encrypted by the node and never shown again), set **who may use it** (per agent: read / write / spend) and whether every use needs approval, test a use as a chosen agent, delete a service |
 | **Approvals** | When an agent tries to use a gated service, its request waits here. **Approve once** lets exactly that one use through — the next use asks again. Deny grants nothing. Decided history below |
 | **Activity** | The audit trail: vault use-checks, approval requests / decisions / consumption, and task events. Secrets never appear here |
-| **Settings** | Node info, lock (forget the token on this tab), and the Phase 4 note on pairing other machines |
+| **Settings** | Node info, lock (forget the token on this tab), and Peers — pair other machines into your mesh (Phase 4, below) |
 
 ### Approvals, in the API
 
@@ -262,3 +262,67 @@ Phase 3 tests (`tests/test_phase3.py`) cover GUI serving, the full
 approval flow (deny grants nothing; approve grants exactly one use),
 the activity endpoint, the vault admin endpoints and the pack endpoint,
 with the dummy secret scanned out of every response.
+
+## v2 Phase 4 — node-to-node: pairing, transport, offline queue
+
+Phase 4 turns separate nodes into one mesh. Each machine runs its own
+node with its own persistent identity (`node.json` in its data dir);
+paired nodes sync their agent directories, exchange tasks and messages,
+and queue deliveries while a peer is offline.
+
+### Pair two machines (GUI, Settings → Peers)
+
+1. Start the node on both machines (Phase 3 instructions). Note each
+   node's URL as shown in **Settings → Peers** ("Node URL") — on
+   Tailscale this is the machine's `100.x.y.z` address, port 8790.
+2. On machine B: **Settings → Peers → Generate a pairing code.** The
+   code is shown once, works once, and expires in 15 minutes.
+3. On machine A: enter B's node URL and the code in the pair form and
+   click **Pair with that machine**.
+4. Both machines now list each other under "Paired machines", and each
+   node's **Agents** screen shows the other machine's agents marked
+   *remote*. From then on, ordering a remote agent works exactly like
+   ordering a local one — the task is forwarded, worked on its home
+   node, and its status, progress and result flow back.
+
+Pairing can equally be driven from the API (`POST /peers/pairing-code`,
+`POST /peers/pair`, admin token on your own node only).
+
+### Security model (5 lines)
+
+- Pairing is authenticated by the one-time code; during pairing the two
+  nodes establish a shared per-peer secret, stored only in each node's
+  own data dir — never logged, never returned by any list endpoint.
+- Every node-to-node request is signed: HMAC-SHA256 over
+  timestamp + method + path + body, with a 5-minute replay window.
+- Unknown nodes, bad signatures and stale timestamps are rejected.
+- A peer credential works **only** on `/peer/*` endpoints — it can
+  never call agent or admin endpoints (and vice versa).
+- HMAC gives authentication and integrity, **not encryption**: the
+  pairing secret and all peer traffic must travel over a trusted
+  channel — your LAN or Tailscale (which encrypts it). TLS termination,
+  if wanted beyond that, is the operator's/Tailscale's job. Do not pair
+  or run peer traffic over the open internet as-is.
+
+### Offline outbox
+
+Every outbound peer delivery (directory sync, task creates/updates,
+messages) goes through a persistent outbox in the node's data dir:
+states `pending` / `delivered` / `failed`, attempt counts, and backoff
+retries (default 1s, 5s, 15s, then 60s; tune with
+`AGENT_MESH_RETRY_SCHEDULE`, flush interval with `AGENT_MESH_FLUSH_SEC`).
+If a peer is down, orders are still accepted and wait; when it returns
+they deliver in order, and duplicate deliveries never duplicate a task
+or message on the receiving side. Settings → Peers shows outbox counts
+and a "Send queued items now" button (`POST /peers/flush`).
+
+Meshes are **pairwise**: a node talks only to nodes it paired with —
+there is no relaying through a third node.
+
+Phase 4 tests (`tests/test_phase4.py`) run two real node processes and
+cover pairing (code reuse/wrong code fail, no secret in any response),
+transport security (bad signature, stale timestamp, unknown node, peer
+credentials refused on admin routes), directory sync, a remote task
+completed on B and read back DONE on A, a remote message, and the
+offline queue (task queued while B is down, delivered exactly once
+when B returns).

@@ -10,7 +10,8 @@ const TRANSITIONS = {
   IN_REVIEW: ["DONE", "FAILED", "IN_PROGRESS"], DONE: [], FAILED: [],
 };
 const state = { agents: [], tasks: [], services: {}, approvals: [],
-                entries: [], messages: [], screen: "dashboard" };
+                entries: [], messages: [], peers: [], outbox: null,
+                nodeInfo: null, screen: "dashboard" };
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v == null ? "" : v)
   .replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;",
@@ -52,10 +53,12 @@ async function api(path, opts) {
 
 /* ---------- data loading ---------- */
 async function loadAll() {
-  const [agents, tasks, services, approvals, activity, messages] =
+  const [agents, tasks, services, approvals, activity, messages,
+         peers, nodeInfo] =
     await Promise.all([
       api("/agents"), api("/tasks"), api("/vault/services"),
       api("/approvals"), api("/activity?limit=100"), api("/messages"),
+      api("/peers"), api("/node/info"),
     ]);
   state.agents = agents.agents;
   state.tasks = tasks.tasks;
@@ -63,6 +66,9 @@ async function loadAll() {
   state.approvals = approvals.approvals;
   state.entries = activity.entries;
   state.messages = messages.messages;
+  state.peers = peers.peers;
+  state.outbox = peers.outbox;
+  state.nodeInfo = nodeInfo;
   $("node-status").innerHTML = '<span class="dot"></span>node online';
   renderAll();
 }
@@ -70,6 +76,7 @@ async function loadAll() {
 function renderAll() {
   renderDashboard(); renderAgents(); renderTasks();
   renderMessages(); renderVault(); renderApprovals(); renderActivity();
+  renderPeers();
   const pending = state.approvals.filter((a) => a.status === "pending").length;
   const badge = $("nav-approval-badge");
   badge.textContent = pending;
@@ -105,8 +112,10 @@ function renderAgents() {
   $("agents-list").innerHTML = state.agents.length ? state.agents.map((a) =>
     `<div class="row-item"><div class="row-top">
        <b>${esc(a.name)}</b><span class="pill ${esc(a.status)}">${esc(a.status)}</span>
-       <span class="chip">${esc(a.role)}</span><span class="spacer"></span>
-       <button class="btn small" data-pack="${esc(a.id)}">Connection pack</button>
+       <span class="chip">${esc(a.role)}</span>
+       ${a.remote ? `<span class="chip">remote · home ${esc(a.home_node)}</span>` : ""}
+       <span class="spacer"></span>
+       ${a.remote ? "" : `<button class="btn small" data-pack="${esc(a.id)}">Connection pack</button>`}
      </div>
      <div class="muted">${esc(a.id)} · ${esc(a.machine || "no machine")} · ` +
      `capabilities: ${esc((a.capabilities || []).join(", ") || "none")} · ` +
@@ -421,6 +430,67 @@ function renderActivity() {
      <div class="line"><span>Tasks total</span><b>${state.tasks.length}</b></div>
      <div class="line"><span>Vault services</span><b>${Object.keys(state.services).length}</b></div>`;
 }
+
+/* ---------- peers (Phase 4) ---------- */
+function renderPeers() {
+  const info = state.nodeInfo || {};
+  $("peers-this-node").innerHTML =
+    `<div class="line"><span>This node</span><b>${esc(info.name || "")}</b></div>
+     <div class="line"><span>Node ID</span><b>${esc(info.node_id || "")}</b></div>
+     <div class="line"><span>Node URL (give this to the other machine)</span><b>${esc(info.url || location.origin)}</b></div>`;
+  $("peers-list").innerHTML = state.peers.length ? state.peers.map((p) =>
+    `<div class="row-item"><div class="row-top">
+       <b>${esc(p.name || p.node_id)}</b>
+       <span class="pill ${esc(p.status)}">${esc(p.status)}</span>
+       <span class="spacer"></span>
+       <button class="btn small" data-psync="${esc(p.node_id)}">Sync directory</button>
+     </div>
+     <div class="muted">${esc(p.node_id)} · ${esc(p.url)} · ` +
+     `paired ${esc(fmtTime(p.paired_at))} · last seen ${esc(fmtTime(p.last_seen))}</div></div>`).join("")
+    : '<p class="muted">No paired machines yet — pair the first one above.</p>';
+  document.querySelectorAll("[data-psync]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      try {
+        await api(`/peers/${btn.dataset.psync}/sync`, { method: "POST", body: {} });
+        await api("/peers/flush", { method: "POST", body: {} });
+        await loadAll();
+        toast("Directory sync queued and sent.");
+      } catch (e) { toast(e.message, true); }
+    }));
+  const c = state.outbox || { pending: 0, delivered: 0, failed: 0 };
+  $("outbox-counts").textContent =
+    `Outbox: ${c.pending} waiting · ${c.delivered} delivered · ${c.failed} failed`;
+}
+
+$("pair-code-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  try {
+    const out = await api("/peers/pairing-code", { method: "POST", body: {} });
+    $("pair-code-out").innerHTML =
+      `Code <b>${esc(out.code)}</b> — enter it on the other machine ` +
+      `before ${esc(fmtTime(out.expires_at))}. It works once.`;
+  } catch (e) { toast(e.message, true); }
+});
+
+$("pair-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  try {
+    const out = await api("/peers/pair", { method: "POST", body: {
+      peer_url: $("pair-url").value.trim(), code: $("pair-code").value.trim() } });
+    ev.target.reset();
+    await api("/peers/flush", { method: "POST", body: {} }).catch(() => {});
+    await loadAll();
+    toast("Paired with " + (out.peer.name || out.peer.node_id) + ".");
+  } catch (e) { toast(e.message, true); }
+});
+
+$("outbox-flush").addEventListener("click", async () => {
+  try {
+    const out = await api("/peers/flush", { method: "POST", body: {} });
+    await loadAll();
+    toast(`Outbox sent: ${out.delivered} delivered, ${out.failed} still waiting.`);
+  } catch (e) { toast(e.message, true); }
+});
 
 /* ---------- navigation + login ---------- */
 const TITLES = { dashboard: "Dashboard", agents: "Agents", tasks: "Tasks",

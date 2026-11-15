@@ -105,3 +105,61 @@ Base: `http://127.0.0.1:<port>` (default port 8790). JSON in/out.
 
 Admin auth: `X-Admin-Token: <AGENT_MESH_ADMIN>`. Agent auth: Bearer token.
 No/unknown credentials = `401`; authenticated but not permitted = `403`.
+
+## 6. Federation (Phase 4)
+
+Each node has a persistent identity: `node_id` (`nod_` + 16 hex) and a
+display name, stored in `<data dir>/node.json`.
+
+**Pairing.** An admin on node B creates a pairing code
+(`POST /peers/pairing-code`, admin): 8 hex chars, stored hashed, one
+use, expires in ≤15 min (`AGENT_MESH_PAIR_TTL_SEC`). An admin on node A
+calls `POST /peers/pair {peer_url, code}` on **A**; A then calls B's
+`POST /peer/pair` with `{node_id, name, url, code}` — the code is that
+call's only credential. On success B generates a per-peer secret
+(`token_urlsafe(32)`) and returns it once in the pairing response; both
+nodes store it in their own `peers.db` (0600). It is never logged and
+never appears in any list/info response (`GET /peers` shows id, name,
+url, status, timestamps only). Reusing the code, or a wrong/expired
+code, fails. Pairing must happen over a trusted channel (LAN/Tailscale)
+because the secret crosses in that one response.
+
+**Signed transport.** All other `/peer/*` calls carry headers
+`X-Mesh-Node` (sender node id), `X-Mesh-Timestamp` (unix seconds),
+`X-Mesh-Signature` = hex HMAC-SHA256(peer_secret,
+`timestamp + "." + METHOD + "." + path + "." + raw_body`). Receivers
+reject unknown nodes (`403`), timestamps more than 5 minutes old
+(`401`), and bad signatures (`401`). Peer credentials authorise
+`/peer/*` only — they never satisfy agent or admin auth, and agent /
+admin credentials never satisfy peer auth. HMAC provides
+authentication + integrity, not confidentiality.
+
+**Federation payloads** (all delivered via the outbox, below):
+- `POST /peer/directory {node_id, name, agents}` — sender's local agent
+  list; the receiver caches it as remote agents (`remote: true`,
+  `home_node` = sender) and merges them into `GET /agents`.
+- `POST /peer/task_sync {task}` — a full task snapshot. If the
+  snapshot's `origin_node` is the receiver, it merges into the local
+  task named by `origin_task_id`; otherwise the receiver upserts its
+  home-side copy keyed by (`origin_node` = sender, `origin_task_id` =
+  snapshot `id`). Merging is monotonic: status rank never moves
+  backwards (a terminal state wins), progress notes union, a set result
+  wins — so re-delivery and out-of-order delivery are harmless.
+- `POST /peer/message {message}` — stored in the receiver's bus;
+  duplicates are dropped by the message's stable `correlation_id`.
+
+A task created for a remote agent is stored on the origin node with
+`home_node` set; the home node's copy carries `origin_node` +
+`origin_task_id`. Status changes, progress notes and results made on
+either side queue a `task_sync` to the other side.
+
+**Outbox.** All outbound peer deliveries are rows in `peers.db`:
+`{peer, kind, payload, dedupe_key (unique per peer), state
+(pending|delivered|failed), attempts, next_retry}`. A background loop
+flushes due items in insertion order; backoff follows
+`AGENT_MESH_RETRY_SCHEDULE` (default `1,5,15,60` seconds), flush
+interval `AGENT_MESH_FLUSH_SEC` (default 2s); after
+`AGENT_MESH_OUTBOX_MAX_ATTEMPTS` (default 100) an item is `failed`.
+`POST /peers/flush` (admin) forces a pass; `GET /peers/outbox` (admin)
+shows counts and recent items (payloads excluded). Meshes are
+pairwise — no relaying through third nodes.

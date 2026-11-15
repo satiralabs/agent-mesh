@@ -82,6 +82,20 @@ def list_messages(recipient: Optional[str] = None, sender: Optional[str] = None,
     conn.close()
     return results
 
+def message_exists(correlation_id: str, db_path: str = DEFAULT_DB_PATH) -> bool:
+    """Phase 4 dedupe: has a message with this correlation id already
+    been stored? (Federated deliveries carry a stable correlation id.)"""
+    if not correlation_id:
+        return False
+    init_db(db_path)
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT 1 FROM messages WHERE correlation_id=? LIMIT 1",
+        (correlation_id,)).fetchone()
+    conn.close()
+    return row is not None
+
+
 def ack_message(message_id: int, db_path: str = DEFAULT_DB_PATH) -> bool:
     init_db(db_path)
     conn = get_connection(db_path)

@@ -54,6 +54,15 @@ class TaskStore:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 )""")
+            # Phase 4 federation columns (added by migration so Phase 1
+            # databases keep working): origin_node/origin_task_id link a
+            # home-side copy back to the task on its origin node;
+            # home_node marks an origin-side task whose assignee lives
+            # on a peer node.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+            for col in ("origin_node", "origin_task_id", "home_node"):
+                if col not in cols:
+                    conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
         conn.close()
 
     def _conn(self) -> sqlite3.Connection:
@@ -75,7 +84,10 @@ class TaskStore:
                depends_on: Optional[str] = None,
                idempotency_key: Optional[str] = None,
                budget_time_sec=None, budget_tokens=None,
-               budget_money=None):
+               budget_money=None,
+               origin_node: Optional[str] = None,
+               origin_task_id: Optional[str] = None,
+               home_node: Optional[str] = None):
         if priority not in PRIORITIES:
             raise ValueError(f"priority must be one of {PRIORITIES}")
         if idempotency_key:
@@ -92,11 +104,13 @@ class TaskStore:
                     "assignee_agent,assignee_capability,status,priority,"
                     "parent_id,depends_on,idempotency_key,budget_time_sec,"
                     "budget_tokens,budget_money,progress_notes,created_at,"
-                    "updated_at) VALUES (?,?,?,?,?,?,'DRAFT',?,?,?,?,?,?,?,?,?,?)",
+                    "updated_at,origin_node,origin_task_id,home_node) "
+                    "VALUES (?,?,?,?,?,?,'DRAFT',?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (task_id, title, instructions, requester, assignee_agent,
                      assignee_capability, priority, parent_id, depends_on,
                      idempotency_key, budget_time_sec, budget_tokens,
-                     budget_money, "[]", now, now))
+                     budget_money, "[]", now, now, origin_node,
+                     origin_task_id, home_node))
         except sqlite3.IntegrityError:
             # Lost a race on the idempotency key: return the winner.
             existing = self.get_by_idempotency_key(idempotency_key or "")
@@ -194,3 +208,90 @@ class TaskStore:
                 (json.dumps(notes), time.time(), task_id))
         conn.close()
         return self.get(task_id)
+
+    # -- Phase 4 federation --------------------------------------------------
+    # A task snapshot travels between nodes. Status merges monotonically
+    # (rank never moves backwards, except that a terminal state wins over
+    # a non-terminal one), progress notes union, and a set result wins.
+    # This makes re-delivery and out-of-order delivery harmless.
+
+    _RANK = {"DRAFT": 0, "SENT": 1, "ACCEPTED": 2, "IN_PROGRESS": 3,
+             "IN_REVIEW": 4, "DONE": 5, "FAILED": 5, "REJECTED": 5}
+
+    def get_by_origin(self, origin_node: str,
+                      origin_task_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE origin_node=? AND origin_task_id=?",
+            (origin_node, origin_task_id)).fetchone()
+        conn.close()
+        return self._row(row) if row else None
+
+    def _merge_state(self, task_id: str, snap: Dict[str, Any]) -> Dict[str, Any]:
+        task = self.get(task_id)
+        cur_rank = self._RANK.get(task["status"], 0)
+        new_rank = self._RANK.get(snap.get("status", task["status"]), 0)
+        status = task["status"]
+        if new_rank > cur_rank or (new_rank == 5 and cur_rank < 5):
+            status = snap["status"]
+        notes = list(task["progress_notes"])
+        seen = {(n.get("agent"), n.get("at"), n.get("note")) for n in notes}
+        for n in snap.get("progress_notes") or []:
+            key = (n.get("agent"), n.get("at"), n.get("note"))
+            if key not in seen:
+                notes.append(n)
+                seen.add(key)
+        notes.sort(key=lambda n: n.get("at") or 0)
+        result = snap.get("result") if snap.get("result") is not None \
+            else task["result"]
+        conn = self._conn()
+        with conn:
+            conn.execute(
+                "UPDATE tasks SET status=?, result=?, progress_notes=?, "
+                "updated_at=? WHERE id=?",
+                (status, result, json.dumps(notes),
+                 max(task["updated_at"], snap.get("updated_at") or 0),
+                 task_id))
+        conn.close()
+        return self.get(task_id)
+
+    def upsert_federated(self, snap: Dict[str, Any],
+                         origin_node: str) -> Dict[str, Any]:
+        """Home side: create or update the local copy of a task whose
+        origin is `origin_node` and whose origin id is snap['id'].
+        Duplicate delivery returns the existing copy unchanged."""
+        existing = self.get_by_origin(origin_node, snap["id"])
+        if existing:
+            return self._merge_state(existing["id"], snap)
+        if snap.get("status") not in STATUSES:
+            raise InvalidTransition(f"unknown status {snap.get('status')!r}")
+        task_id = "tsk_" + uuid.uuid4().hex[:16]
+        now = time.time()
+        conn = self._conn()
+        with conn:
+            conn.execute(
+                "INSERT INTO tasks (id,title,instructions,requester,"
+                "assignee_agent,assignee_capability,status,priority,"
+                "parent_id,depends_on,idempotency_key,budget_time_sec,"
+                "budget_tokens,budget_money,progress_notes,result,"
+                "created_at,updated_at,origin_node,origin_task_id,home_node) "
+                "VALUES (?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,?,?,?,?,?,?,?,NULL)",
+                (task_id, snap.get("title", ""), snap.get("instructions", ""),
+                 snap.get("requester", ""), snap.get("assignee_agent"),
+                 snap.get("assignee_capability"), snap["status"],
+                 snap.get("priority", "normal"),
+                 snap.get("budget_time_sec"), snap.get("budget_tokens"),
+                 snap.get("budget_money"),
+                 json.dumps(snap.get("progress_notes") or []),
+                 snap.get("result"), snap.get("created_at") or now,
+                 snap.get("updated_at") or now, origin_node, snap["id"]))
+        conn.close()
+        return self.get(task_id)
+
+    def apply_remote_state(self, snap: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Origin side: merge a home node's snapshot into the local task
+        it refers to via snap['origin_task_id']. None if unknown."""
+        local_id = snap.get("origin_task_id")
+        if not local_id or self.get(local_id) is None:
+            return None
+        return self._merge_state(local_id, snap)
