@@ -1,4 +1,11 @@
-"""Task store (v2 Phase 1) — strict lifecycle, dependencies, idempotency."""
+"""Task store (v2 Phase 1) — strict lifecycle, dependencies, idempotency.
+
+v2.2 adds collaboration: a task has PARTICIPANTS (the primary assignee
+is the lead participant; others are collaborators who can see the task,
+comment on its shared thread and add progress notes, but cannot drive
+its lifecycle) and a comment THREAD that travels with the task across
+nodes exactly like its progress notes do.
+"""
 import json
 import os
 import sqlite3
@@ -21,6 +28,10 @@ TRANSITIONS = {
 }
 # Moving into these states requires any depends_on task to be DONE.
 _DEPENDENCY_GATED = {"ACCEPTED", "IN_PROGRESS"}
+# Terminal states: no transitions out, and (v2.2) no new participants,
+# comments or progress notes in.
+TERMINAL_STATUSES = ("DONE", "FAILED", "REJECTED")
+PARTICIPANT_ROLES = ("lead", "collaborator")
 
 
 class InvalidTransition(ValueError):
@@ -63,6 +74,31 @@ class TaskStore:
             for col in ("origin_node", "origin_task_id", "home_node"):
                 if col not in cols:
                     conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
+            # v2.2 collaboration tables (new tables, so Phase 1-4
+            # databases gain them by creation; existing tasks are
+            # backfilled with a lead row for their assignee below).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS task_participants (
+                    task_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'collaborator',
+                    added_by TEXT DEFAULT '',
+                    added_at REAL NOT NULL,
+                    PRIMARY KEY (task_id, agent_id)
+                )""")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS task_comments (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    author TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )""")
+            conn.execute(
+                "INSERT OR IGNORE INTO task_participants "
+                "(task_id, agent_id, role, added_by, added_at) "
+                "SELECT id, assignee_agent, 'lead', requester, created_at "
+                "FROM tasks WHERE assignee_agent IS NOT NULL")
         conn.close()
         try:
             os.chmod(db_path, 0o600)
@@ -81,6 +117,57 @@ class TaskStore:
         d["progress_notes"] = json.loads(d.get("progress_notes") or "[]")
         return d
 
+    # -- v2.2 collaboration: participants + comment thread ------------------
+    @staticmethod
+    def _participant_rows(conn, task_id: str) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            "SELECT agent_id, role, added_by, added_at "
+            "FROM task_participants WHERE task_id=? "
+            "ORDER BY added_at, agent_id", (task_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    @staticmethod
+    def _comment_rows(conn, task_id: str) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            "SELECT id, author, body, created_at FROM task_comments "
+            "WHERE task_id=? ORDER BY created_at, id",
+            (task_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    @staticmethod
+    def _insert_participant(conn, task_id: str, agent_id: str, role: str,
+                            added_by: str, added_at: float) -> None:
+        conn.execute(
+            "INSERT OR IGNORE INTO task_participants "
+            "(task_id, agent_id, role, added_by, added_at) "
+            "VALUES (?,?,?,?,?)",
+            (task_id, agent_id, role, added_by, added_at))
+
+    def _attach(self, task: Dict[str, Any],
+                comments: bool = True) -> Dict[str, Any]:
+        conn = self._conn()
+        task["participants"] = self._participant_rows(conn, task["id"])
+        if comments:
+            task["comments"] = self._comment_rows(conn, task["id"])
+        conn.close()
+        return task
+
+    def participant_ids(self, task_id: str) -> List[str]:
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT agent_id FROM task_participants WHERE task_id=?",
+            (task_id,)).fetchall()
+        conn.close()
+        return [r["agent_id"] for r in rows]
+
+    def is_participant(self, task_id: str, agent_id: str) -> bool:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT 1 FROM task_participants WHERE task_id=? AND agent_id=?",
+            (task_id, agent_id)).fetchone()
+        conn.close()
+        return row is not None
+
     def create(self, title: str, requester: str, instructions: str = "",
                assignee_agent: Optional[str] = None,
                assignee_capability: Optional[str] = None,
@@ -91,7 +178,8 @@ class TaskStore:
                budget_money=None,
                origin_node: Optional[str] = None,
                origin_task_id: Optional[str] = None,
-               home_node: Optional[str] = None):
+               home_node: Optional[str] = None,
+               participants: Optional[List[str]] = None):
         if priority not in PRIORITIES:
             raise ValueError(f"priority must be one of {PRIORITIES}")
         if idempotency_key:
@@ -115,6 +203,17 @@ class TaskStore:
                      idempotency_key, budget_time_sec, budget_tokens,
                      budget_money, "[]", now, now, origin_node,
                      origin_task_id, home_node))
+                # v2.2: the assignee is the lead participant; any
+                # extra participants join as collaborators.
+                if assignee_agent:
+                    self._insert_participant(
+                        conn, task_id, assignee_agent, "lead",
+                        requester, now)
+                for pid in participants or []:
+                    if pid and pid != assignee_agent:
+                        self._insert_participant(
+                            conn, task_id, pid, "collaborator",
+                            requester, now)
         except sqlite3.IntegrityError:
             # Lost a race on the idempotency key: return the winner.
             existing = self.get_by_idempotency_key(idempotency_key or "")
@@ -130,7 +229,9 @@ class TaskStore:
         row = conn.execute("SELECT * FROM tasks WHERE id=?",
                            (task_id,)).fetchone()
         conn.close()
-        return self._row(row) if row else None
+        if row is None:
+            return None
+        return self._attach(self._row(row))
 
     def get_by_idempotency_key(self, key: str) -> Optional[Dict[str, Any]]:
         if not key:
@@ -139,11 +240,13 @@ class TaskStore:
         row = conn.execute("SELECT * FROM tasks WHERE idempotency_key=?",
                            (key,)).fetchone()
         conn.close()
-        return self._row(row) if row else None
+        return self._attach(self._row(row)) if row else None
 
     def list_tasks(self, assignee_agent: Optional[str] = None,
                    requester: Optional[str] = None,
-                   status: Optional[str] = None) -> List[Dict[str, Any]]:
+                   status: Optional[str] = None,
+                   participant_agent: Optional[str] = None,
+                   visible_to: Optional[str] = None) -> List[Dict[str, Any]]:
         q = "SELECT * FROM tasks WHERE 1=1"
         params: List[Any] = []
         if assignee_agent:
@@ -155,11 +258,94 @@ class TaskStore:
         if status:
             q += " AND status=?"
             params.append(status)
+        if participant_agent:
+            q += " AND id IN (SELECT task_id FROM task_participants " \
+                 "WHERE agent_id=?)"
+            params.append(participant_agent)
+        if visible_to:
+            # v2.2 visibility scoping: an agent's list contains only
+            # tasks it is involved in — as requester, as lead, or as a
+            # participant. (The owner/admin view passes visible_to=None.)
+            q += " AND (requester=? OR assignee_agent=? OR id IN " \
+                 "(SELECT task_id FROM task_participants WHERE agent_id=?))"
+            params += [visible_to, visible_to, visible_to]
         q += " ORDER BY created_at"
         conn = self._conn()
         rows = conn.execute(q, params).fetchall()
         conn.close()
-        return [self._row(r) for r in rows]
+        # Lists carry participants (the board shows them) but not the
+        # comment thread — that lives on the single-task view.
+        return [self._attach(self._row(r), comments=False) for r in rows]
+
+    # -- v2.2 participants + comments ---------------------------------------
+    def add_participant(self, task_id: str, agent_id: str,
+                        added_by: str) -> Dict[str, Any]:
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        if task["status"] in TERMINAL_STATUSES:
+            raise InvalidTransition(
+                f"cannot add a participant to a {task['status']} task")
+        role = "lead" if agent_id == task.get("assignee_agent") \
+            else "collaborator"
+        conn = self._conn()
+        with conn:
+            self._insert_participant(conn, task_id, agent_id, role,
+                                     added_by, time.time())
+            conn.execute("UPDATE tasks SET updated_at=? WHERE id=?",
+                         (time.time(), task_id))
+        conn.close()
+        return self.get(task_id)
+
+    def remove_participant(self, task_id: str,
+                           agent_id: str) -> Dict[str, Any]:
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        if task["status"] in TERMINAL_STATUSES:
+            raise InvalidTransition(
+                f"cannot remove a participant from a {task['status']} task")
+        if agent_id == task.get("assignee_agent"):
+            raise ValueError(
+                "the lead (primary assignee) cannot be removed from "
+                "its own task")
+        conn = self._conn()
+        with conn:
+            cur = conn.execute(
+                "DELETE FROM task_participants WHERE task_id=? "
+                "AND agent_id=?", (task_id, agent_id))
+            if cur.rowcount == 0:
+                raise KeyError(
+                    f"agent {agent_id} is not a participant of {task_id}")
+            conn.execute("UPDATE tasks SET updated_at=? WHERE id=?",
+                         (time.time(), task_id))
+        conn.close()
+        return self.get(task_id)
+
+    def add_comment(self, task_id: str, author: str,
+                    body: str) -> Dict[str, Any]:
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        if task["status"] in TERMINAL_STATUSES:
+            raise InvalidTransition(
+                f"cannot comment on a {task['status']} task")
+        comment = {"id": "cmt_" + uuid.uuid4().hex[:16],
+                   "author": author, "body": body,
+                   "created_at": time.time()}
+        conn = self._conn()
+        with conn:
+            conn.execute(
+                "INSERT INTO task_comments (id, task_id, author, body, "
+                "created_at) VALUES (?,?,?,?,?)",
+                (comment["id"], task_id, author, body,
+                 comment["created_at"]))
+            # Bumping updated_at also moves the federation sync dedupe
+            # key, so the new comment is queued for the peer nodes.
+            conn.execute("UPDATE tasks SET updated_at=? WHERE id=?",
+                         (time.time(), task_id))
+        conn.close()
+        return self.get(task_id)
 
     def transition(self, task_id: str, to_status: str,
                    result: Optional[str] = None) -> Dict[str, Any]:
@@ -256,6 +442,35 @@ class TaskStore:
                 (status, result, json.dumps(notes),
                  max(task["updated_at"], snap.get("updated_at") or 0),
                  task_id))
+            # v2.2: participants merge as a union by agent id, comments
+            # as a union by comment id (comments are append-only, and
+            # their ids are globally unique, so re-delivery and
+            # out-of-order delivery are harmless). Removals do not
+            # propagate — the same monotonic rule as progress notes.
+            have = {p["agent_id"] for p in task.get("participants") or []}
+            for p in snap.get("participants") or []:
+                if p.get("agent_id") and p["agent_id"] not in have:
+                    self._insert_participant(
+                        conn, task_id, p["agent_id"],
+                        p.get("role") or "collaborator",
+                        p.get("added_by") or "",
+                        p.get("added_at") or time.time())
+                    have.add(p["agent_id"])
+            if snap.get("assignee_agent") \
+                    and snap["assignee_agent"] not in have:
+                self._insert_participant(
+                    conn, task_id, snap["assignee_agent"], "lead",
+                    snap.get("requester") or "", time.time())
+            seen_comments = {c["id"] for c in task.get("comments") or []}
+            for c in snap.get("comments") or []:
+                if c.get("id") and c["id"] not in seen_comments:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO task_comments "
+                        "(id, task_id, author, body, created_at) "
+                        "VALUES (?,?,?,?,?)",
+                        (c["id"], task_id, c.get("author", ""),
+                         c.get("body", ""), c.get("created_at") or 0))
+                    seen_comments.add(c["id"])
         conn.close()
         return self.get(task_id)
 
@@ -289,6 +504,29 @@ class TaskStore:
                  json.dumps(snap.get("progress_notes") or []),
                  snap.get("result"), snap.get("created_at") or now,
                  snap.get("updated_at") or now, origin_node, snap["id"]))
+            # v2.2: the snapshot's participants + comment thread are
+            # stored against the NEW local copy id (comment ids stay
+            # the sender's — they are the cross-node dedupe key).
+            if snap.get("assignee_agent"):
+                self._insert_participant(
+                    conn, task_id, snap["assignee_agent"], "lead",
+                    snap.get("requester") or "",
+                    snap.get("created_at") or now)
+            for p in snap.get("participants") or []:
+                if p.get("agent_id"):
+                    self._insert_participant(
+                        conn, task_id, p["agent_id"],
+                        p.get("role") or "collaborator",
+                        p.get("added_by") or "",
+                        p.get("added_at") or now)
+            for c in snap.get("comments") or []:
+                if c.get("id"):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO task_comments "
+                        "(id, task_id, author, body, created_at) "
+                        "VALUES (?,?,?,?,?)",
+                        (c["id"], task_id, c.get("author", ""),
+                         c.get("body", ""), c.get("created_at") or now))
         conn.close()
         return self.get(task_id)
 
