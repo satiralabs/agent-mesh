@@ -1,0 +1,20 @@
+[Unit]
+Description=Agent Mesh autonomous worker (Antigravity agent)
+After=agent-mesh-node.service network.target
+Wants=agent-mesh-node.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.mesh-worker/mesh_worker.py
+Restart=on-failure
+RestartSec=10
+# agy's auth lives in Susan's graphical (desktop) session — the hub
+# process runs there. These are the stable values for uid 1000 on
+# this machine and match `systemctl --user show-environment`.
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+
+[Install]
+WantedBy=default.target
