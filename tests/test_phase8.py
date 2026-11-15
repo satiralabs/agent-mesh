@@ -249,5 +249,85 @@ class TestPairingBurnOverHttp(unittest.TestCase):
             shutil.rmtree(dir_f, ignore_errors=True)
 
 
+# ----------------------------------------------------------------------
+# F2 — scanner normalization + base64 decode-and-rescan
+# ----------------------------------------------------------------------
+FAKE_GHP8 = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+
+
+class TestScannerHardeningF2(unittest.TestCase):
+    """The eight obfuscations that passed the v2.1.0 scanner
+    (SECURITY-PERF-REPORT §1.3) must now be caught."""
+
+    def test_space_split_token_caught(self):
+        self.assertIn("github_token", scan_text(
+            "key ghp_A1b2C3d4E5f6 G7h8I9j0K1l2M3n4O5p6 end"))
+
+    def test_newline_split_token_caught(self):
+        self.assertIn("openai_key", scan_text(
+            "use sk-proj-Ab3dEf5Gh7Jk\n9Mn1Pq3Rs5Tu7Vw9Xy ok"))
+
+    def test_base64_encoded_token_caught(self):
+        blob = base64.b64encode(FAKE_GHP8.encode()).decode()
+        self.assertIn("github_token", scan_text(f"blob: {blob}"))
+        wrapped = "\n".join(blob[i:i + 16]
+                            for i in range(0, len(blob), 16))
+        self.assertIn("github_token", scan_text(f"blob:\n{wrapped}"))
+        creds = base64.b64encode(b"password = Sup3rSecretValue").decode()
+        self.assertIn("secret_assignment", scan_text(f"cfg {creds}"))
+
+    def test_spaced_api_key_keyword_caught(self):
+        self.assertIn("secret_assignment",
+                      scan_text("api key: Sup3rSecretValue99"))
+
+    def test_lowercase_aws_key_caught(self):
+        self.assertIn("aws_access_key",
+                      scan_text("id akiaiosfodnn7example end"))
+        self.assertIn("aws_access_key",
+                      scan_text("AKIA IOSFODNN7EXAMPLE"))
+
+    def test_short_password_value_caught(self):
+        self.assertIn("secret_assignment", scan_text("password = abc123"))
+        self.assertIn("secret_assignment",
+                      scan_text("password = Tr0ub4dor&3xyz"))
+
+    def test_zero_width_characters_do_not_hide_shapes(self):
+        self.assertIn("secret_assignment",
+                      scan_text("pass\u200bword = Sup3rSecretValue"))
+        self.assertIn("github_token", scan_text(
+            "ghp\u200b_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"))
+
+    def test_dot_inserted_sk_key_caught(self):
+        self.assertIn("openai_key", scan_text(
+            "sk-proj.abcd1234.efgh5678.ijkl9012"))
+
+    def test_split_jwt_caught(self):
+        self.assertIn("jwt", scan_text(
+            "eyJhbGciOiJIUzI1NiJ9. eyJzdWIiOiIxMjM0NTY3ODkwIn0. "
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c"))
+
+    def test_prose_and_code_still_pass(self):
+        clean = [
+            "let us discuss the token budget and the secret santa plan",
+            "the token economy and secret plans",
+            "password = changeme-now",          # placeholder
+            "password = true",                  # config boolean, not a secret
+            "the password = the one you chose at signup",
+            "the password must be at least 8 characters long",
+            "Akia said the deployment failed and went home",
+            "api key: the one stored in the vault, rotate monthly",
+            "fixed in commit "
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709 today",
+            "the Authorization header uses the Bearer scheme with "
+            "short tokens",
+            "we use sk-learn and task-oriented design patterns",
+            "ghp_ tokens are used for authentication purposes",
+            "your password protects the vault and the policy is strict",
+            "id <redacted> end",
+        ]
+        for text in clean:
+            self.assertEqual(scan_text(text), [], text)
+
+
 if __name__ == "__main__":
     unittest.main()
