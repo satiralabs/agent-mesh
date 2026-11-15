@@ -1,0 +1,4 @@
+# Phase 1 core runs on the Python standard library alone.
+# Optional but preferred: if `cryptography` is installed, the vault uses
+# Fernet instead of the OpenSSL-CLI fallback (see agent_mesh/vault.py).
+cryptography>=42
