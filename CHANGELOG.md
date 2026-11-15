@@ -1,5 +1,58 @@
 # Changelog
 
+## v2.1.0 — 2026-11-15
+
+Built on branch `v2-phase1` (code + tests; live nodes redeploy
+separately). Spec additions in `PROTOCOL.md` §7; honest scope notes
+in `V2.1-NOTES.md`.
+
+- **Vault credential sharing (A).** Vault services are now typed
+  credentials — `api_key`, `login`, `ssh`, `oauth_token`, `generic` —
+  with non-secret metadata (username/url, host/user/port, upstream,
+  label) listable while the secret stays encrypted at rest. The owner
+  can share one credential with one agent under a grant: `use`
+  (brokered — the secret never leaves the node; login/ssh uses return
+  connection details only) or `reveal` (the agent receives the secret
+  value, per-use approved through the existing one-shot approval
+  queue unless the grant is a standing reveal). Every reveal is
+  audit-logged without the value. GUI: type selector with per-type
+  fields and a share panel per credential.
+- **Handover automation (B).** The canonical handover rules
+  (`agent_mesh/handover_rules.md`, versioned) are served at
+  `GET /handover/rules` and delivered to every agent exactly once per
+  rules version on registration / first heartbeat. Entries are filed
+  via `POST /handover/entries` (scanner-gated), the MCP tool
+  `mesh_handover_log`, or `python3 -m agent_mesh.handover ...` — the
+  node stores them and regenerates `HANDOVER-<node>.md` in its data
+  dir, so filing works even for agents that can't keep files. GUI
+  gains a Handover screen; Settings shows the rules version.
+- **Presence fix (C).** Agent liveness is computed from `last_seen`
+  (online < 120 s, idle < 15 min, offline after; revoked wins) and
+  exposed as `presence`; directory sync carries the origin node's
+  `last_seen` instead of stamping sync time. GUI badges and dashboard
+  counts use the computed presence.
+- **Inbox watcher (D).** `scripts/inbox_watch.py` polls an agent's
+  inbox with its pack credentials and appends new messages to a local
+  file, deduped by message id. (Pushing into a host's live chat is
+  the host's job — see PROTOCOL §7.4.)
+- **Glassmorphic GUI (E).** Full visual overhaul of the web GUI:
+  translucent glass panels, backdrop blur, layered gradients, soft
+  shadows, dark glass theme. Same screens, ids and behaviour.
+- **Browser extension (F).** `extension/` — Manifest V3 for Chromium
+  browsers: node status, agent counts by presence, pending approvals,
+  Open GUI / Open Approvals. Token lives in `chrome.storage.local`;
+  the only server contacted is the configured node.
+- **Web app + installers (G).** The GUI is an installable PWA
+  (manifest + shell-only service worker; also the Android path).
+  `installers/` gains `install-linux.sh` (systemd --user + desktop
+  entry, no sudo), `install-windows.ps1` (logon task + shortcut),
+  `install-macos.sh` (launchd agent) and `ANDROID.md` (PWA + Termux).
+- **Universal packs (H).** Connection packs now come in five formats —
+  `mcp`, `claude-code`, `cursor`, `rest` (env + curl guide) and
+  `chat-paste` (plain-English instructions incl. file-drop and
+  human-relay for tool-less agents). PROTOCOL §7.5 has the
+  compatibility matrix.
+
 ## v2.0.1 — 2026-11-15
 
 - Admin disconnect/reconnect of agents (Phase 6): POST

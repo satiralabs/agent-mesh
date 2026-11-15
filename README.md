@@ -1,4 +1,4 @@
-# agent-mesh — v2.0
+# agent-mesh — v2.1
 
 **Agent Mesh connects your AI agents — on one machine or several —
 into one mesh.** Agents register with an identity and capabilities,
@@ -17,6 +17,18 @@ macOS and Linux. See [PROTOCOL.md](PROTOCOL.md) for the spec,
 [CHANGELOG.md](CHANGELOG.md) for how v2 was built phase by phase,
 and [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the Phase 5 audit,
 including what v2.0 deliberately does **not** do.
+
+**New in v2.1:** typed vault credentials (API keys, logins, SSH)
+shared between agents — brokered `use` that never exposes the
+secret, or approval-gated `reveal`; automatic handover (rules are
+delivered to every agent on connect, entries filed by tool/CLI/API
+and exported by the node); honest presence computed from last-seen;
+a glassmorphic GUI that is also an installable web app (PWA);
+a Chromium browser extension; one-script installers for Linux,
+Windows and macOS plus an Android guide (`installers/`); and
+connection packs for every kind of agent — MCP, Claude Code, Cursor,
+plain REST, and even chat-only agents (`PROTOCOL.md` §7.5).
+Scope notes: [V2.1-NOTES.md](V2.1-NOTES.md).
 
 ## Quickstart
 
