@@ -28,7 +28,7 @@ from . import bus, peers as peers_mod
 from .approvals import ApprovalStore
 from .handover_log import HandoverStore
 from .handover_rules import rules_text, rules_version, starter_message
-from .pack import build_pack
+from .pack import PACK_FORMATS, build_pack, build_pack_variant
 from .registry import DEFAULT_ROLE, Registry, order_denial
 from .scan import scan_fields
 from .tasks import InvalidTransition, TaskStore
@@ -728,6 +728,11 @@ def make_handler(node: Node):
                     # Register a new agent and return its connection pack.
                     if not self._require_admin():
                         return
+                    fmt = body.get("format", "mcp")
+                    if fmt not in PACK_FORMATS:
+                        return self._send(
+                            400, {"error": f"unknown pack format {fmt!r}; "
+                                           f"allowed {PACK_FORMATS}"})
                     agent, token = node.registry.register(
                         name=body.get("name", "unnamed"),
                         machine=body.get("machine", ""),
@@ -735,8 +740,10 @@ def make_handler(node: Node):
                         capabilities=body.get("capabilities", []),
                         role=body.get("role") or DEFAULT_ROLE)
                     node.deliver_handover_starter(agent)
-                    pack = build_pack(self._node_url(), agent, token)
-                    return self._send(201, {"agent": agent, "pack": pack})
+                    pack = build_pack_variant(self._node_url(), agent,
+                                              token, fmt)
+                    return self._send(201, {"agent": agent, "pack": pack,
+                                            "format": fmt})
                 if path.startswith("/agents/") and path.endswith("/pack"):
                     # New pack for an existing agent: rotates its token
                     # (the old token stops working).
@@ -746,9 +753,16 @@ def make_handler(node: Node):
                     agent = node.registry.get(agent_id)
                     if agent is None:
                         return self._send(404, {"error": "agent not found"})
+                    fmt = body.get("format", "mcp")
+                    if fmt not in PACK_FORMATS:
+                        return self._send(
+                            400, {"error": f"unknown pack format {fmt!r}; "
+                                           f"allowed {PACK_FORMATS}"})
                     token = node.registry.rotate_token(agent_id)
-                    pack = build_pack(self._node_url(), agent, token)
-                    return self._send(200, {"agent": agent, "pack": pack})
+                    pack = build_pack_variant(self._node_url(), agent,
+                                              token, fmt)
+                    return self._send(200, {"agent": agent, "pack": pack,
+                                            "format": fmt})
                 if path.startswith("/agents/") and \
                         path.endswith("/disconnect"):
                     # Phase 6: admin disconnects (revokes) an agent.

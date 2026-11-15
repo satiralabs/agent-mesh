@@ -1,7 +1,7 @@
-# Agent Mesh Protocol — v2.0
+# Agent Mesh Protocol — v2.1
 
-Concise spec for the v2 engine (Phases 1-5). One node serves many
-agents; paired nodes federate (§6).
+Concise spec for the v2 engine (Phases 1-6, v2.1 in §7). One node
+serves many agents; paired nodes federate (§6).
 
 ## 1. Agent identity
 
@@ -213,3 +213,79 @@ interval `AGENT_MESH_FLUSH_SEC` (default 2s); after
 `POST /peers/flush` (admin) forces a pass; `GET /peers/outbox` (admin)
 shows counts and recent items (payloads excluded). Meshes are
 pairwise — no relaying through third nodes.
+
+## 7. v2.1 additions
+
+### 7.1 Presence (computed, never stored)
+
+Every agent object carries `presence`, computed from `last_seen` at
+read time: **online** if seen < 120 s ago, **idle** if < 15 min,
+**offline** otherwise; `revoked` (admin disconnect) always wins. The
+stored `status` field remains for compatibility (heartbeat may set
+`busy`), but no client should treat it as liveness — a stored "online"
+went stale silently before v2.1. Directory sync (§6) carries each
+agent's **origin-node** `last_seen`; receivers must not substitute
+sync time, or every remote agent looks freshly online after a sync.
+
+### 7.2 Vault credential types and sharing grants
+
+A vault service is a typed credential: `api_key`, `login`, `ssh`,
+`oauth_token`, or `generic`. Type metadata is non-secret and listable
+(`GET /vault/services` returns `type`, `meta`, `grants`): login →
+`username`, `url`; ssh → `host`, `user`, `port`; api/oauth → the
+upstream; generic → a `label`. The secret value itself stays
+encrypted at rest and is never listed.
+
+On top of the §4 ACL (the broker decision for API use), the owner can
+**share** a credential with one agent (`POST
+/vault/services/{name}/grants`, admin; `DELETE
+/vault/services/{name}/grants/{agent_id}` revokes):
+
+- mode `use` — brokered. `POST /vault/credential-use` returns the
+  decision plus non-secret connection details only (login: username +
+  url; ssh: host + user + port; api/oauth: upstream). The secret
+  never leaves the node.
+- mode `reveal` — `POST /vault/reveal` returns the secret value, but
+  only after a per-use approval (the §4 approval store, action
+  `reveal`: one approval = one reveal, then it re-gates), unless the
+  grant is marked `standing_reveal`. Every reveal attempt — allowed,
+  gated, or denied — is audit-logged with agent, credential name and
+  outcome, never the value.
+
+### 7.3 Handover automation
+
+The canonical handover rules live in `agent_mesh/handover_rules.md`
+(version parsed from the file; `GET /handover/rules`, agent-auth).
+On registration and on first heartbeat the node sends the agent ONE
+starter message (idempotent per agent per rules version) summarising
+the standard and the filing paths. Entries are filed with
+`POST /handover/entries` (agent-auth; secret scanner applies) — via
+the MCP tool `mesh_handover_log`, the CLI
+`python3 -m agent_mesh.handover --title ... --asked ... --done ...
+--verified ... --decisions ... --files ... --open ...`, or a script
+filing on the agent's behalf. The node stores entries in SQLite and
+regenerates `HANDOVER-<node-name>.md` in its data dir after each one.
+
+### 7.4 Inbox notification (honest scope)
+
+Mesh messages land in the node's inbox store. **Nothing in the mesh
+can push a message into a host application's live chat** — surfacing
+it there is the host's job. The mesh provides: `scripts/inbox_watch.py`
+(polls an agent's inbox with its pack credentials, appends new
+messages to a local file, dedupes by message id), the GUI's badges +
+10 s auto-refresh, and the activity trail.
+
+### 7.5 Agent compatibility matrix
+
+One registration, five pack formats (`POST /agents/pack` with
+`format`, or `python3 -m agent_mesh.pack --format ...`):
+
+| Agent kind | Pack format | How it connects |
+|---|---|---|
+| MCP agents (generic) | `mcp` | Paste the `mcpServers` JSON into the tool's MCP config; the node runs as a stdio MCP server with 9 tools. |
+| Claude Code | `claude-code` | Same `mcpServers` JSON, pasted into `.mcp.json` / Claude Code settings. |
+| Cursor | `cursor` | Same `mcpServers` JSON, pasted into `.cursor/mcp.json`. |
+| REST agents (any HTTP client / script) | `rest` | Env file (`AGENT_MESH_NODE` / `AGENT_MESH_TOKEN` / `AGENT_MESH_AGENT`) + a curl guide; plain §5 API with `Authorization: Bearer`. |
+| CLI-only agents (shell, no MCP) | `rest` env + `mesh_cli` | `python3 -m agent_mesh.mesh_cli …` subcommands cover agents/inbox/send/tasks/vault decisions/handover. |
+| Chat-only agents (no tools at all) | `chat-paste` | A plain-English block the human pastes into the chat: identity, the CLI commands if it gains shell access, the **file-drop** folder protocol (one JSON file per message/task into the watched folder), and the **human-relay** fallback (dictate the message/entry; the human files it). |
+| Human | — | The GUI: everything an agent can do, the owner can do from the browser (or the browser extension / installed PWA). |

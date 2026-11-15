@@ -351,5 +351,104 @@ class TestHandover(unittest.TestCase):
                             for e in entries))
 
 
+# ---------------------------------------------------------------------------
+# D. Inbox watcher
+# ---------------------------------------------------------------------------
+class TestInboxWatch(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.node, cls.data_dir, cls.base = start_node("p7-watch")
+        cls.admin = MeshClient(cls.base, admin_token=ADMIN)
+        reg = cls.admin.register(name="P7 Watched", role="worker")
+        cls.agent_id = reg["agent"]["id"]
+        cls.token = reg["token"]
+        # Owner sends the agent a message.
+        status, _ = raw(cls.base, "POST", "/messages",
+                        {"recipient": cls.agent_id, "msg_type": "INFO",
+                         "payload": "watcher test ping"}, admin=ADMIN)
+        assert status == 201, status
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _run_watcher(self, out_path):
+        env = dict(os.environ)
+        env["AGENT_MESH_NODE"] = self.base
+        env["AGENT_MESH_TOKEN"] = self.token
+        script = os.path.join(REPO, "scripts", "inbox_watch.py")
+        return subprocess.run(
+            [sys.executable, script, "--once", "--out", out_path],
+            capture_output=True, text=True, env=env, timeout=30)
+
+    def test_watcher_reports_each_message_once(self):
+        out_path = os.path.join(self.data_dir, "inbox.log")
+        proc = self._run_watcher(out_path)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(out_path) as fh:
+            lines = [l for l in fh.read().splitlines() if l.strip()]
+        pings = [l for l in lines if "watcher test ping" in l]
+        self.assertEqual(len(pings), 1)
+        # Second run: dedupe by message id — nothing new is appended.
+        proc = self._run_watcher(out_path)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(out_path) as fh:
+            lines2 = [l for l in fh.read().splitlines() if l.strip()]
+        self.assertEqual(len(lines2), len(lines))
+
+
+# ---------------------------------------------------------------------------
+# H. Universal pack formats
+# ---------------------------------------------------------------------------
+class TestPackFormats(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.node, cls.data_dir, cls.base = start_node("p7-packs")
+        cls.admin = MeshClient(cls.base, admin_token=ADMIN)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def test_variants_cover_every_agent_kind(self):
+        from agent_mesh.pack import build_pack_variants
+        agent = {"id": "agt_unit", "name": "Unit Agent"}
+        variants = build_pack_variants("http://127.0.0.1:8790", agent,
+                                       "unit-token")
+        self.assertEqual(set(variants), {"mcp", "claude-code", "cursor",
+                                         "rest", "chat-paste"})
+        for fmt in ("mcp", "claude-code", "cursor"):
+            env = variants[fmt]["mcpServers"]["agent-mesh"]["env"]
+            self.assertEqual(env["AGENT_MESH_AGENT"], "agt_unit")
+        self.assertIn("AGENT_MESH_NODE=http://127.0.0.1:8790",
+                      variants["rest"]["env_file"])
+        self.assertIn("curl", variants["rest"]["examples_md"])
+        paste = variants["chat-paste"]
+        self.assertIsInstance(paste, str)
+        self.assertIn("Unit Agent", paste)
+        self.assertIn("mesh-drop", paste)       # file-drop path
+        self.assertIn("relay", paste)           # human relay path
+        self.assertIn("handover", paste.lower())
+
+    def test_node_serves_non_mcp_formats(self):
+        out = self.admin.register_with_pack(name="P7 Paste Agent",
+                                            format="chat-paste")
+        self.assertEqual(out["format"], "chat-paste")
+        self.assertIsInstance(out["pack"], str)
+        self.assertIn("P7 Paste Agent", out["pack"])
+        out = self.admin.register_with_pack(name="P7 Rest Agent",
+                                            format="rest")
+        self.assertIn("env_file", out["pack"])
+        # Default format is still the MCP JSON the GUI/tests rely on.
+        out = self.admin.register_with_pack(name="P7 Mcp Agent")
+        self.assertIn("mcpServers", out["pack"])
+
+    def test_node_rejects_unknown_format(self):
+        status, _ = raw(self.base, "POST", "/agents/pack",
+                        {"name": "P7 Bad Format", "format": "telepathy"},
+                        admin=ADMIN)
+        self.assertEqual(status, 400)
+
+
 if __name__ == "__main__":
     unittest.main()
