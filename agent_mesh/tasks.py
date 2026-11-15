@@ -64,6 +64,10 @@ class TaskStore:
                 if col not in cols:
                     conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
         conn.close()
+        try:
+            os.chmod(db_path, 0o600)
+        except OSError:
+            pass
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)

@@ -14,6 +14,47 @@ from typing import Any, Dict, List, Optional, Tuple
 ROLES = ("owner", "orchestrator", "worker")
 STATUSES = ("online", "busy", "offline")
 
+# Registration without an explicit role defaults to "orchestrator"
+# (Phase 5): in Phases 1-4 ordering was not enforced, so existing
+# agents were registered role-less and must keep working. The ordering
+# matrix below bites as soon as an agent is EXPLICITLY a worker.
+DEFAULT_ROLE = "orchestrator"
+
+
+def order_denial(requester_id: str, requester_role: str,
+                 assignee_agent: str = None,
+                 assignee_role: str = None,
+                 assignee_capability: str = None):
+    """Ordering-permission matrix (Phase 5, hard-enforced).
+
+    Returns None if the order is allowed, else a human-readable reason
+    (safe to return to the caller and to audit — it contains ids and
+    roles only, never content).
+
+    - owner: may order anyone (named agent, or by capability).
+    - orchestrator: may order workers and orchestrators (named or by
+      capability); may NOT order an owner-role agent.
+    - worker: may NOT order other agents at all. It may create a task
+      assigned to itself, and it may send messages/questions to anyone
+      (messages are not orders and are not checked here).
+    An assignee whose role is unknown (not registered locally and not
+    in the remote directory) is treated as a non-owner target.
+    """
+    if requester_role == "owner":
+        return None
+    if requester_role == "orchestrator":
+        if assignee_agent and assignee_role == "owner":
+            return (f"orchestrator {requester_id} may not order "
+                    f"owner-role agent {assignee_agent}")
+        return None
+    if requester_role == "worker":
+        if assignee_agent and assignee_agent == requester_id \
+                and not assignee_capability:
+            return None
+        return (f"worker {requester_id} may not order other agents "
+                f"(it may only create tasks assigned to itself)")
+    return f"unknown requester role {requester_role!r}"
+
 
 def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -24,6 +65,10 @@ class Registry:
         self.db_path = db_path
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._init()
+        try:
+            os.chmod(db_path, 0o600)  # token hashes live here (Phase 5)
+        except OSError:
+            pass
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
@@ -41,7 +86,7 @@ class Registry:
                     machine TEXT DEFAULT '',
                     node TEXT DEFAULT '',
                     capabilities TEXT DEFAULT '[]',
-                    role TEXT NOT NULL DEFAULT 'worker',
+                    role TEXT NOT NULL DEFAULT 'orchestrator',
                     status TEXT NOT NULL DEFAULT 'online',
                     token_hash TEXT NOT NULL,
                     created_at REAL NOT NULL,
@@ -60,7 +105,7 @@ class Registry:
 
     def register(self, name: str, machine: str = "", node: str = "",
                  capabilities: Optional[List[str]] = None,
-                 role: str = "worker") -> Tuple[Dict[str, Any], str]:
+                 role: str = DEFAULT_ROLE) -> Tuple[Dict[str, Any], str]:
         if role not in ROLES:
             raise ValueError(f"role must be one of {ROLES}, got {role!r}")
         agent_id = "agt_" + secrets.token_hex(8)

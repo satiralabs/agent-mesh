@@ -27,7 +27,8 @@ from urllib.parse import parse_qs, urlparse
 from . import bus, peers as peers_mod
 from .approvals import ApprovalStore
 from .pack import build_pack
-from .registry import Registry
+from .registry import DEFAULT_ROLE, Registry, order_denial
+from .scan import scan_fields
 from .tasks import InvalidTransition, TaskStore
 from .vault import Vault
 
@@ -54,8 +55,20 @@ class Node:
                  max_attempts: Optional[int] = None):
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
+        try:
+            os.chmod(data_dir, 0o700)  # Phase 5: node data is owner-only
+        except OSError:
+            pass
         self.admin_token = admin_token
         self.audit_path = os.path.join(data_dir, "audit.log")
+        # Create the audit log up front at 0600; later appends (node,
+        # vault, approvals) inherit the existing file's permissions.
+        with open(self.audit_path, "a"):
+            pass
+        try:
+            os.chmod(self.audit_path, 0o600)
+        except OSError:
+            pass
         self.registry = Registry(os.path.join(data_dir, "agents.db"))
         self.tasks = TaskStore(os.path.join(data_dir, "tasks.db"))
         self.bus_db = os.path.join(data_dir, "bus.db")
@@ -108,6 +121,50 @@ class Node:
         entry.setdefault("ts", time.time())
         with open(self.audit_path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+
+    # -- Phase 5 ordering matrix -------------------------------------------
+    def _target_role(self, assignee_agent: Optional[str]) -> Optional[str]:
+        if not assignee_agent:
+            return None
+        local = self.registry.get(assignee_agent)
+        if local:
+            return local["role"]
+        remote = self.peers.find_remote_agent(assignee_agent)
+        return remote.get("role") if remote else None
+
+    def check_order(self, actor: Dict[str, Any],
+                    assignee_agent: Optional[str],
+                    assignee_capability: Optional[str]) -> Optional[str]:
+        """None if `actor` may create this task, else the denial reason."""
+        return order_denial(actor["id"], actor.get("role") or "worker",
+                            assignee_agent,
+                            self._target_role(assignee_agent),
+                            assignee_capability)
+
+    def check_remote_order(self, sender_node: str, snap: Dict[str, Any],
+                           ) -> Optional[str]:
+        """Matrix check for a peer-originated task snapshot about to be
+        created on THIS node. The requester's role comes from the
+        sender's synced directory (the reserved id 'owner' is the human
+        on the origin node and keeps owner rights). Unknown requesters
+        are denied: the directory sync precedes task sync in the outbox,
+        so a legit requester is known by the time its task arrives, and
+        the sender's outbox retries while it is not."""
+        requester = snap.get("requester") or ""
+        if requester == "owner":
+            requester_role = "owner"
+        else:
+            known = [a for a in self.peers.remote_agents()
+                     if a["id"] == requester
+                     and a["home_node"] == sender_node]
+            if not known:
+                return (f"remote requester {requester} is not in "
+                        f"{sender_node}'s synced directory")
+            requester_role = known[0].get("role") or "worker"
+        return order_denial(requester, requester_role,
+                            snap.get("assignee_agent"),
+                            self._target_role(snap.get("assignee_agent")),
+                            snap.get("assignee_capability"))
 
     def read_activity(self, limit: int = 100):
         entries = []
@@ -265,8 +322,11 @@ def make_handler(node: Node):
             return self._send_bytes(200, data, content_type)
 
         def _body(self) -> Dict[str, Any]:
-            length = int(self.headers.get("Content-Length") or 0)
-            if not length:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            if length <= 0:
                 self._raw = b""
                 return {}
             self._raw = self.rfile.read(length)
@@ -315,6 +375,47 @@ def make_handler(node: Node):
                 self._send(401, {"error": "unauthenticated: missing or "
                                           "invalid token"})
             return actor
+
+        def _scan_gate(self, actor_id: str, actor_role: str,
+                       fields: Dict[str, Any], body: Dict[str, Any],
+                       action: str) -> bool:
+            """Phase 5 secret scanner. True = content may proceed.
+            On a hit: audits the block (rule name + actor only — never
+            the matched text) and sends 400, or 403 when a non-owner
+            tried to use the owner override. The owner (admin actor or
+            an owner-role agent) may resend with allow_secret_risk:
+            true; that override is audited too."""
+            hits = scan_fields(fields)
+            if not hits:
+                return True
+            rule = hits[0]
+            if body.get("allow_secret_risk"):
+                if actor_id == "owner" or actor_role == "owner":
+                    node.audit_event({
+                        "event": "secret_scan_override", "agent": actor_id,
+                        "service": "", "action": action, "rule": rule,
+                        "outcome": "override_allowed"})
+                    return True
+                node.audit_event({
+                    "event": "secret_scan_blocked", "agent": actor_id,
+                    "service": "", "action": action, "rule": rule,
+                    "outcome": "override_denied"})
+                self._send(403, {
+                    "error": f"blocked by secret scanner (rule: {rule}); "
+                             f"only the owner may override with "
+                             f"allow_secret_risk", "rule": rule})
+                return False
+            node.audit_event({
+                "event": "secret_scan_blocked", "agent": actor_id,
+                "service": "", "action": action, "rule": rule,
+                "outcome": "blocked"})
+            self._send(400, {
+                "error": f"blocked by secret scanner: rule '{rule}' "
+                         f"matched credential-shaped content; nothing "
+                         f"was stored. If this is a false positive, the "
+                         f"owner may resend with allow_secret_risk: true.",
+                "rule": rule, "rules": hits})
+            return False
 
         def _require_admin(self) -> bool:
             if not node.is_admin(self.headers):
@@ -375,11 +476,13 @@ def make_handler(node: Node):
                     actor = self._require_actor()
                     if actor is None:
                         return
-                    if "recipient" in qs:
-                        recipient = qs["recipient"][0]
-                    elif node.is_admin(self.headers):
-                        recipient = None  # owner sees all recent traffic
+                    if node.is_admin(self.headers):
+                        # Owner may inspect any inbox (or all traffic).
+                        recipient = qs.get("recipient", [None])[0]
                     else:
+                        # Phase 5 fix: an agent reads ONLY its own
+                        # inbox — a ?recipient= naming someone else is
+                        # ignored, not honoured.
                         recipient = actor["id"]
                     msgs = bus.list_messages(
                         recipient=recipient, unread_only=False, limit=100,
@@ -480,12 +583,47 @@ def make_handler(node: Node):
                                 and snap.get("origin_task_id"):
                             task = node.tasks.apply_remote_state(snap)
                         else:
+                            # Phase 5: a remote task is CREATED here —
+                            # scan it and enforce the ordering matrix
+                            # against the origin requester before it
+                            # exists on this node. A denial returns 403,
+                            # so the sender's outbox keeps it retrying /
+                            # failed rather than delivered.
+                            if not self._scan_gate(
+                                    snap.get("requester", sender),
+                                    "peer",
+                                    {"title": snap.get("title", ""),
+                                     "instructions":
+                                         snap.get("instructions", ""),
+                                     "result": snap.get("result")},
+                                    {}, "peer_task"):
+                                return
+                            existing = node.tasks.get_by_origin(
+                                sender, snap.get("id", ""))
+                            if existing is None:
+                                denial = node.check_remote_order(
+                                    sender, snap)
+                                if denial:
+                                    node.audit_event({
+                                        "event": "task_order_denied",
+                                        "agent":
+                                            snap.get("requester", ""),
+                                        "service": "", "action": "create",
+                                        "outcome": "denied_remote",
+                                        "reason": denial})
+                                    return self._send(
+                                        403, {"error": denial})
                             task = node.tasks.upsert_federated(snap, sender)
                         return self._send(
                             200, {"ok": True,
                                   "task_id": task["id"] if task else None})
                     if path == "/peer/message":
                         msg = body.get("message") or {}
+                        if not self._scan_gate(
+                                msg.get("sender", sender), "peer",
+                                {"payload": msg.get("payload", "")},
+                                {}, "peer_message"):
+                            return
                         dedupe = msg.get("correlation_id") or ""
                         if dedupe and bus.message_exists(
                                 dedupe, db_path=node.bus_db):
@@ -538,7 +676,7 @@ def make_handler(node: Node):
                         machine=body.get("machine", ""),
                         node=body.get("node", ""),
                         capabilities=body.get("capabilities", []),
-                        role=body.get("role", "worker"))
+                        role=body.get("role") or DEFAULT_ROLE)
                     # Token is returned exactly once, here.
                     return self._send(201, {"agent": agent, "token": token})
                 if path == "/agents/pack":
@@ -550,7 +688,7 @@ def make_handler(node: Node):
                         machine=body.get("machine", ""),
                         node=body.get("node", ""),
                         capabilities=body.get("capabilities", []),
-                        role=body.get("role", "worker"))
+                        role=body.get("role") or DEFAULT_ROLE)
                     pack = build_pack(self._node_url(), agent, token)
                     return self._send(201, {"agent": agent, "pack": pack})
                 if path.startswith("/agents/") and path.endswith("/pack"):
@@ -578,6 +716,11 @@ def make_handler(node: Node):
                     if not body.get("recipient") or not body.get("msg_type"):
                         return self._send(400, {"error": "recipient and "
                                                         "msg_type required"})
+                    if not self._scan_gate(
+                            actor["id"], actor.get("role") or "",
+                            {"payload": body.get("payload", "")}, body,
+                            "message"):
+                        return
                     corr = body.get("correlation_id") \
                         or f"{node.node_id}:msg:{int(time.time()*1000)}:" \
                            f"{actor['id']}"
@@ -605,6 +748,23 @@ def make_handler(node: Node):
                         return
                     if not body.get("title"):
                         return self._send(400, {"error": "title required"})
+                    # Phase 5: ordering matrix (hard-enforced) + scan.
+                    denial = node.check_order(
+                        actor, body.get("assignee_agent"),
+                        body.get("assignee_capability"))
+                    if denial:
+                        node.audit_event({
+                            "event": "task_order_denied",
+                            "agent": actor["id"], "service": "",
+                            "action": "create", "outcome": "denied",
+                            "reason": denial})
+                        return self._send(403, {"error": denial})
+                    if not self._scan_gate(
+                            actor["id"], actor.get("role") or "",
+                            {"title": body.get("title", ""),
+                             "instructions": body.get("instructions", "")},
+                            body, "task_create"):
+                        return
                     home_node = None
                     if body.get("assignee_agent"):
                         remote = node.peers.find_remote_agent(
@@ -636,6 +796,11 @@ def make_handler(node: Node):
                     actor = self._require_actor()
                     if actor is None:
                         return
+                    if body.get("result") and not self._scan_gate(
+                            actor["id"], actor.get("role") or "",
+                            {"result": body.get("result")}, body,
+                            "task_result"):
+                        return
                     try:
                         task = node.tasks.transition(
                             path.split("/")[2], body.get("to", ""),
@@ -653,6 +818,11 @@ def make_handler(node: Node):
                 if path.startswith("/tasks/") and path.endswith("/progress"):
                     actor = self._require_actor()
                     if actor is None:
+                        return
+                    if not self._scan_gate(
+                            actor["id"], actor.get("role") or "",
+                            {"note": body.get("note", "")}, body,
+                            "task_progress"):
                         return
                     try:
                         task = node.tasks.add_progress(

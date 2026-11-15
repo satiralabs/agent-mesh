@@ -1,4 +1,88 @@
-# agent-mesh
+# agent-mesh — v2.0
+
+**Agent Mesh connects your AI agents — on one machine or several —
+into one mesh.** Agents register with an identity and capabilities,
+exchange messages, and *order each other tasks* under a permission
+matrix (owner → orchestrator → worker). Shared account credentials
+and APIs live in an encrypted vault: an agent asks the broker, the
+broker decides (allow / deny / needs your approval), and **no agent
+ever sees a raw secret**. Everything is driven from a GUI — a web
+control centre served by the node, with a Tauri desktop scaffold —
+and every security-relevant event lands in an audit log.
+
+Cross-platform by construction: the node is pure Python 3.11+
+(stdlib-first; the `cryptography` package is used when present, with
+a documented OpenSSL fallback), so the same code runs on Windows,
+macOS and Linux. See [PROTOCOL.md](PROTOCOL.md) for the spec,
+[CHANGELOG.md](CHANGELOG.md) for how v2 was built phase by phase,
+and [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the Phase 5 audit,
+including what v2.0 deliberately does **not** do.
+
+## Quickstart
+
+### 1. Install
+
+```bash
+git clone https://github.com/satiralabs/agent-mesh.git
+cd agent-mesh
+pip install .            # or just run with PYTHONPATH=. from the repo root
+```
+
+### 2. Start a node
+
+```bash
+export AGENT_MESH_ADMIN='choose-a-node-admin-token'      # you, the owner
+export AGENT_MESH_MASTER='choose-a-vault-passphrase'     # encrypts the vault
+python3 -m agent_mesh.node --port 8790 --data-dir ~/.agent-mesh-node
+```
+
+### 3. Open the GUI
+
+Open **http://127.0.0.1:8790/** and enter the admin token. From here
+everything is clicks: add vault credentials, set who may use them,
+create tasks, approve gated uses, watch activity. (Details: the
+Phase 3 section below.)
+
+### 4. Connect an agent
+
+In the GUI: **Agents → add an agent** — you get a *connection pack*
+(a ready-to-paste MCP config; the agent's token exists only inside
+it). Paste it into the agent tool's MCP configuration, or generate
+one from the terminal:
+
+```bash
+export AGENT_MESH_ADMIN='your-node-admin-token'
+python3 -m agent_mesh.pack --node http://127.0.0.1:8790 \
+  --name "My Agent" --capabilities coding,research \
+  --out ~/agent-mesh-pack.json
+```
+
+Shell-only agents use the CLI shim, file-only agents the file-drop
+folder (Phase 2 section below).
+
+### 5. Pair a second machine
+
+Run a node on the second machine too (steps 1-2, its own admin token
+and data dir; the machines must reach each other — same LAN or
+Tailscale). Then, in the GUI on both sides under **Settings → Peers**:
+
+1. On machine B: **Generate a pairing code** (shown once, 15 minutes).
+2. On machine A: enter B's node URL + the code, click **Pair**.
+3. Done — each GUI now lists the other machine's agents as *remote*,
+   and ordering one works exactly like ordering a local agent,
+   including while it is offline (deliveries queue and land once).
+
+Full detail, the ordering matrix, and the vault model are in
+[PROTOCOL.md](PROTOCOL.md). Run the whole test suite (60 tests,
+stdlib unittest) with:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+---
+
+## v1 (still included, unchanged)
 
 An ultra-lightweight, zero-cost, secure agent communication toolkit, handover synchronization engine, and zero-trust secret broker.
 

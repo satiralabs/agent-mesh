@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, Optional
 from .client import MeshClient, MeshError
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "agent-mesh", "version": "2.0.0-phase2"}
+SERVER_INFO = {"name": "agent-mesh", "version": "2.0.0"}
 
 # Friendly task-update actions -> node lifecycle states (PROTOCOL.md §3).
 TASK_ACTIONS = {

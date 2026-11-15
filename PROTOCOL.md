@@ -1,7 +1,7 @@
-# Agent Mesh Protocol — v2 Phase 1
+# Agent Mesh Protocol — v2.0
 
-Concise spec for the Phase 1 core engine. One node serves many agents;
-node-to-node transport is Phase 4 and out of scope here.
+Concise spec for the v2 engine (Phases 1-5). One node serves many
+agents; paired nodes federate (§6).
 
 ## 1. Agent identity
 
@@ -18,10 +18,33 @@ An agent registers once (admin-only, see §5) and receives:
 | `last_seen` | Updated by registration and `POST /agents/heartbeat` |
 | auth token | `secrets.token_urlsafe(32)`, shown **once** at registration. The node stores only its SHA-256 hash. Sent as `Authorization: Bearer <token>` on every agent call. Missing/wrong token = `401`. |
 
-Ordering rule (default matrix): owner may order anyone; orchestrator may
-order workers; workers may report/ask but not order other workers. Phase 1
-records roles; hard enforcement of the ordering matrix on task creation is
-deferred (task creation is authenticated, assignee is recorded).
+**Ordering matrix (hard-enforced since Phase 5)** on every task
+creation, local and remote-originated alike. A violation is rejected
+with `403` and a reason naming the ids and roles involved, and the
+denial is written to the audit log (`task_order_denied`):
+
+- `owner` (an owner-role agent, or the reserved GUI actor `owner`):
+  may order anyone — a named agent, or by capability.
+- `orchestrator`: may order workers and orchestrators, named or by
+  capability; may NOT order an owner-role agent.
+- `worker`: may NOT create tasks for other agents at all. It may
+  create a task assigned to itself, and it may send messages/questions
+  to anyone — messages are not orders and are never matrix-checked.
+- Capability-assigned tasks: only owner / orchestrator may create them.
+- Remote-originated tasks (§6): the receiving node applies the same
+  matrix using the requester's role from the sender's synced directory
+  (the origin node's `owner` actor keeps owner rights). A requester
+  who is not in the synced directory is denied — directory sync
+  precedes task sync in the outbox, and a denial makes the sender's
+  outbox retry rather than deliver. State merges for tasks that
+  already exist on both sides are not creations and are not checked.
+
+Default role: registration **without** an explicit role yields
+`orchestrator`. Rationale (least surprise): Phases 1-4 recorded roles
+without enforcing them, so agents registered role-less must keep
+working exactly as before; the matrix bites as soon as an agent is
+explicitly registered as a `worker` (or an orchestrator tries to order
+an owner).
 
 ## 2. Messages
 
@@ -85,6 +108,28 @@ Every use-check writes a sanitised audit line
 The raw secret is only ever decrypted inside the node process by the
 broker path (`Vault.get_secret`, never exposed over HTTP).
 
+## 4b. Secret scanner (Phase 5)
+
+Outgoing content is scanned for credential shapes **before** it is
+stored or forwarded: message payloads, task title / instructions /
+result, progress notes, file-drop payloads, and peer-originated
+messages / task snapshots on receipt. Rules (`agent_mesh/scan.py`):
+PEM private-key blocks; token prefixes (`ghp_`/`gho_`…, `sk-…`,
+`AKIA…`, `xox…-`, `Bearer <long>`, JWT-shaped); and
+`password|api_key|secret|token = <value>` assignments whose value is
+not an obvious placeholder (`YOUR_…`, `<…>`, `${…}`, `xxx`, `***`,
+`changeme`, `example`, `redacted`, …). Plain prose mentioning those
+words does not match.
+
+On a hit the submission is rejected with `400` naming **only the
+rule** — the matched text never appears in the error, the audit log,
+or any response — and the block is audited (`secret_scan_blocked`,
+rule + actor only). The owner (admin actor, or an owner-role agent)
+may resend the same content with `allow_secret_risk: true`; the
+override is audited (`secret_scan_override`). Non-owners who attempt
+the override get `403`. File-drop has no override path: a blocked file
+lands in `failed/` with the rule named in its `.error.txt`.
+
 ## 5. Node API and auth
 
 Base: `http://127.0.0.1:<port>` (default port 8790). JSON in/out.
@@ -105,6 +150,10 @@ Base: `http://127.0.0.1:<port>` (default port 8790). JSON in/out.
 
 Admin auth: `X-Admin-Token: <AGENT_MESH_ADMIN>`. Agent auth: Bearer token.
 No/unknown credentials = `401`; authenticated but not permitted = `403`.
+`POST /tasks` additionally enforces the §1 ordering matrix (`403`) and
+the §4b scanner (`400`); `POST /messages` enforces the §4b scanner, and
+`GET /messages` returns only the caller's own inbox unless the caller
+is the admin/owner.
 
 ## 6. Federation (Phase 4)
 

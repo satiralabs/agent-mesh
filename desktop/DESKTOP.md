@@ -19,8 +19,29 @@ A thin Tauri 2 shell around the Phase 3 web GUI:
   `~/.agent-mesh-node/desktop-admin-token.txt` — open that file and type
   the token into the GUI's login screen.
 - The vault also needs `AGENT_MESH_MASTER` in the environment (same as
-  running the node by hand). Bundling a Python runtime and an OS-keystore
-  master key is Phase 5 packaging work, not done here.
+  running the node by hand).
+
+## App icon (done in Phase 5)
+
+`src-tauri/icons/` now holds a real icon set, wired into
+`tauri.conf.json` (`bundle.icon`): `32x32.png`, `128x128.png`,
+`128x128@2x.png` (256), `icon.png` (512) and a multi-size `icon.ico`,
+plus `icon.svg` as the editable source. The mark — a hub node linked to
+five satellite nodes in the v1 palette — is drawn by
+`desktop/make-icon.py` (Pillow): edit the geometry there (or the SVG)
+and re-run `python3 desktop/make-icon.py`. One gap remains: no
+`icon.icns` (macOS) is checked in — on a Mac build machine, run
+`cargo tauri icon src-tauri/icons/icon.png` once to generate it (and
+refresh the PNG set) before bundling.
+
+## Remaining packaging gap (honest)
+
+**Python runtime bundling is NOT done.** The desktop app still needs a
+system Python 3.11+ on PATH with Agent Mesh importable, and the vault
+master passphrase still comes from the environment / a 0600 key file —
+there is no bundled interpreter and no OS-keystore integration yet.
+That is the main thing standing between this scaffold and a
+double-click installer for a machine with nothing on it.
 
 ## Prerequisites (all platforms)
 
@@ -29,8 +50,8 @@ A thin Tauri 2 shell around the Phase 3 web GUI:
 - Python 3.11+ on PATH, with Agent Mesh installed:
   from the repo root, `pip install .` (or run with
   `PYTHONPATH=<repo root>` in the environment)
-- One 1024×1024 PNG for the app icon, then once, from `desktop/`:
-  `cargo tauri icon path/to/icon.png` (generates `src-tauri/icons/`)
+- App icon: already generated (see "App icon" above) — nothing to do
+  except the macOS `.icns` step noted there.
 
 Platform extras:
 

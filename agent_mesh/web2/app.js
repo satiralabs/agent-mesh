@@ -73,14 +73,18 @@ async function loadAll() {
   renderAll();
 }
 
-function renderAll() {
-  renderDashboard(); renderAgents(); renderTasks();
-  renderMessages(); renderVault(); renderApprovals(); renderActivity();
-  renderPeers();
+function updateApprovalBadge() {
   const pending = state.approvals.filter((a) => a.status === "pending").length;
   const badge = $("nav-approval-badge");
   badge.textContent = pending;
   badge.classList.toggle("hidden", pending === 0);
+}
+
+function renderAll() {
+  renderDashboard(); renderAgents(); renderTasks();
+  renderMessages(); renderVault(); renderApprovals(); renderActivity();
+  renderPeers();
+  updateApprovalBadge();
 }
 
 /* ---------- dashboard ---------- */
@@ -492,6 +496,95 @@ $("outbox-flush").addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 
+/* ---------- auto-refresh (Phase 5) ----------
+   Every 10s, refresh ONLY the current screen's data (the same api()
+   calls + render functions loadAll uses). Paused while the tab is
+   hidden, and skipped while a form in the main content is being
+   edited, so a refresh never yanks a half-typed form away. */
+const AUTO_REFRESH_MS = 10000;
+let autoRefreshTimer = null;
+
+const SCREEN_REFRESH = {
+  dashboard: { load: async () => {
+      const [agents, tasks, approvals, activity] = await Promise.all([
+        api("/agents"), api("/tasks"), api("/approvals"),
+        api("/activity?limit=100")]);
+      state.agents = agents.agents; state.tasks = tasks.tasks;
+      state.approvals = approvals.approvals; state.entries = activity.entries;
+    }, render: () => { renderDashboard(); updateApprovalBadge(); } },
+  agents: { load: async () => {
+      state.agents = (await api("/agents")).agents;
+    }, render: renderAgents },
+  tasks: { load: async () => {
+      const [tasks, agents] = await Promise.all(
+        [api("/tasks"), api("/agents")]);
+      state.tasks = tasks.tasks; state.agents = agents.agents;
+    }, render: renderTasks },
+  messages: { load: async () => {
+      const [messages, agents] = await Promise.all(
+        [api("/messages"), api("/agents")]);
+      state.messages = messages.messages; state.agents = agents.agents;
+    }, render: renderMessages },
+  vault: { load: async () => {
+      const [services, agents] = await Promise.all(
+        [api("/vault/services"), api("/agents")]);
+      state.services = services.services; state.agents = agents.agents;
+    }, render: renderVault },
+  approvals: { load: async () => {
+      const [approvals, agents] = await Promise.all(
+        [api("/approvals"), api("/agents")]);
+      state.approvals = approvals.approvals; state.agents = agents.agents;
+    }, render: () => { renderApprovals(); updateApprovalBadge(); } },
+  activity: { load: async () => {
+      const [activity, agents, tasks, services] = await Promise.all([
+        api("/activity?limit=100"), api("/agents"), api("/tasks"),
+        api("/vault/services")]);
+      state.entries = activity.entries; state.agents = agents.agents;
+      state.tasks = tasks.tasks; state.services = services.services;
+    }, render: renderActivity },
+  settings: { load: async () => {
+      const [peers, nodeInfo, agents, tasks, services] = await Promise.all([
+        api("/peers"), api("/node/info"), api("/agents"), api("/tasks"),
+        api("/vault/services")]);
+      state.peers = peers.peers; state.outbox = peers.outbox;
+      state.nodeInfo = nodeInfo; state.agents = agents.agents;
+      state.tasks = tasks.tasks; state.services = services.services;
+    }, render: () => { renderPeers(); renderActivity(); } },
+};
+
+function isEditing() {
+  const el = document.activeElement;
+  return !!el && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName)
+    && !!el.closest("#app");
+}
+
+async function refreshCurrentScreen() {
+  if (document.visibilityState !== "visible") return;  // hidden tab: paused
+  if ($("app").classList.contains("hidden")) return;   // locked / logged out
+  if (isEditing()) return;                            // form being edited
+  const entry = SCREEN_REFRESH[state.screen];
+  if (!entry) return;
+  try { await entry.load(); entry.render(); }
+  catch (e) { /* transient node hiccup — the next tick retries */ }
+}
+
+function startAutoRefresh() {
+  const ind = $("auto-refresh-indicator");
+  if (ind) ind.textContent = "Auto-refresh: on";
+  if (autoRefreshTimer) return;
+  autoRefreshTimer = setInterval(refreshCurrentScreen, AUTO_REFRESH_MS);
+}
+
+document.addEventListener("visibilitychange", () => {
+  const ind = $("auto-refresh-indicator");
+  if (document.visibilityState === "visible") {
+    if (ind) ind.textContent = "Auto-refresh: on";
+    refreshCurrentScreen();
+  } else if (ind) {
+    ind.textContent = "Auto-refresh: paused";
+  }
+});
+
 /* ---------- navigation + login ---------- */
 const TITLES = { dashboard: "Dashboard", agents: "Agents", tasks: "Tasks",
                  messages: "Messages", vault: "Vault", approvals: "Approvals",
@@ -525,6 +618,7 @@ $("login-form").addEventListener("submit", async (ev) => {
     $("login-screen").classList.add("hidden");
     $("app").classList.remove("hidden");
     $("login-error").textContent = "";
+    startAutoRefresh();
   } catch (e) {
     lock();
     $("login-error").textContent = "That token was not accepted by the node.";
@@ -537,6 +631,7 @@ $("login-form").addEventListener("submit", async (ev) => {
       await loadAll();
       $("login-screen").classList.add("hidden");
       $("app").classList.remove("hidden");
+      startAutoRefresh();
     } catch (e) { lock(); }
   }
 })();

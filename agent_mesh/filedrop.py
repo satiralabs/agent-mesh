@@ -24,9 +24,23 @@ import time
 from typing import Any, Dict
 
 from .client import MeshClient, MeshError
+from .scan import scan_fields
 
 
 def _submit(client: MeshClient, item: Dict[str, Any]) -> Dict[str, Any]:
+    # Phase 5: file-drop payloads are scanned BEFORE anything is sent
+    # to the node (the node scans again on receipt). The error names
+    # only the rule — the matched content is never written anywhere,
+    # including the .error.txt this adapter produces. File-drop has no
+    # owner-override path: use the GUI/API for a deliberate override.
+    hits = scan_fields({
+        "title": item.get("title", ""), "instructions":
+        item.get("instructions", ""), "payload": item.get("payload", ""),
+        "result": item.get("result", "")})
+    if hits:
+        raise ValueError(
+            f"blocked by secret scanner: rule '{hits[0]}' matched "
+            f"credential-shaped content; file not submitted")
     kind = item.get("kind")
     if kind == "task":
         if not item.get("title"):

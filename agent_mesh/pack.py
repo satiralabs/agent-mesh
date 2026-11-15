@@ -59,7 +59,7 @@ def write_pack_file(pack: Dict[str, Any], out_path: str) -> str:
 def generate_pack(node_url: str, admin_token: str, name: str,
                   capabilities: Optional[List[str]] = None,
                   out_path: str = "agent-mesh-pack.json",
-                  machine: str = "", role: str = "worker") -> Dict[str, Any]:
+                  machine: str = "", role: str = "orchestrator") -> Dict[str, Any]:
     """Register the agent and write its pack file. Returns the pack."""
     admin = MeshClient(node_url, admin_token=admin_token)
     reg = admin.register(name=name, machine=machine,
@@ -79,7 +79,7 @@ def main(argv=None) -> int:
     parser.add_argument("--capabilities", default="",
                         help="comma-separated, e.g. coding,research")
     parser.add_argument("--machine", default="")
-    parser.add_argument("--role", default="worker",
+    parser.add_argument("--role", default="orchestrator",
                         choices=["owner", "orchestrator", "worker"])
     parser.add_argument("--out", default="agent-mesh-pack.json")
     args = parser.parse_args(argv)

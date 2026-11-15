@@ -54,9 +54,13 @@ class MeshClient:
         return self._call("GET", "/agents")
 
     # messages
-    def send_message(self, recipient: str, msg_type: str, payload: Any = ""):
-        return self._call("POST", "/messages", {
-            "recipient": recipient, "msg_type": msg_type, "payload": payload})
+    def send_message(self, recipient: str, msg_type: str, payload: Any = "",
+                     allow_secret_risk: bool = False):
+        body: Dict[str, Any] = {"recipient": recipient, "msg_type": msg_type,
+                                "payload": payload}
+        if allow_secret_risk:
+            body["allow_secret_risk"] = True
+        return self._call("POST", "/messages", body)
 
     def list_messages(self, recipient: Optional[str] = None):
         q = f"?recipient={recipient}" if recipient else ""

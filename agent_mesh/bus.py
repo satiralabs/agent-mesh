@@ -32,6 +32,10 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_inbox ON messages(recipient, is_processed);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_corr ON messages(correlation_id);")
     conn.close()
+    try:
+        os.chmod(db_path, 0o600)
+    except OSError:
+        pass
 
 def send_message(sender: str, recipient: str, msg_type: str, payload: Any, correlation_id: Optional[str] = None, db_path: str = DEFAULT_DB_PATH) -> int:
     init_db(db_path)
