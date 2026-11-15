@@ -169,6 +169,13 @@ function renderAgents() {
   $("task-assignee").innerHTML =
     '<option value="">— choose —</option>' + opts;
   $("message-recipient").innerHTML = opts;
+  // v2.2: participants multi-select on the task create form.
+  $("task-participants").innerHTML = state.agents.length
+    ? state.agents.map((a) =>
+        `<label class="check"><input type="checkbox" ` +
+        `class="task-participant-box" value="${esc(a.id)}"> ` +
+        `${esc(a.name)}</label>`).join("")
+    : '<span class="muted">No agents yet.</span>';
 }
 
 async function disconnectAgent(agentId) {
@@ -223,6 +230,16 @@ $("pack-copy").addEventListener("click", async () => {
 });
 
 /* ---------- tasks ---------- */
+// v2.2: who is working on a task together (lead + collaborators).
+function participantLine(t) {
+  const ps = t.participants || [];
+  if (!ps.length) return "";
+  const names = ps.map((p) =>
+    `${esc(agentName(p.agent_id))}${p.role === "lead" ? " (lead)" : ""}`
+  ).join(", ");
+  return `<div class="muted">Working together: ${names}</div>`;
+}
+
 function renderTasks() {
   const groups = {};
   state.tasks.forEach((t) => { (groups[t.status] = groups[t.status] || []).push(t); });
@@ -238,7 +255,7 @@ function renderTasks() {
            <span class="muted">${esc(agentName(t.requester))} → ` +
            `${esc(t.assignee_agent ? agentName(t.assignee_agent)
                                    : "capability: " + (t.assignee_capability || "?"))}</span>
-         </div></div>`).join("") + "</div>").join("")
+         </div>${participantLine(t)}</div>`).join("") + "</div>").join("")
     || '<p class="muted">No tasks yet.</p>';
   document.querySelectorAll("[data-task]").forEach((el) =>
     el.addEventListener("click", () => showTask(el.dataset.task)));
@@ -256,6 +273,25 @@ async function showTask(taskId) {
                   (to === "FAILED" || to === "REJECTED") ? "btn danger small" : "btn small";
       return `<button class="${cls}" data-to="${to}">${label}</button>`;
     }).join(" ");
+    // v2.2: participants (lead + collaborators) and the shared thread.
+    const terminal = ["DONE", "FAILED", "REJECTED"].includes(t.status);
+    const ps = t.participants || [];
+    const participantChips = ps.map((p) =>
+      `<span class="chip">${esc(agentName(p.agent_id))} · ${esc(p.role)}` +
+      (!terminal && p.role !== "lead"
+        ? ` <button class="chip-x" data-remove-participant="${esc(p.agent_id)}" title="Remove participant">×</button>`
+        : "") + `</span>`).join(" ");
+    const addable = state.agents.filter(
+      (a) => !ps.some((p) => p.agent_id === a.id));
+    const participantForm = !terminal && addable.length
+      ? `<form id="task-participant-form" class="inline-form">
+           <label>Add participant
+             <select id="task-participant-add">${addable.map((a) =>
+               `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}</select></label>
+           <button class="btn small" type="submit">Add</button></form>`
+      : "";
+    const comments = (t.comments || []).map((c) =>
+      `<div class="line"><span>${esc(fmtTime(c.created_at))}</span><b>${esc(agentName(c.author))}</b><span>${esc(c.body)}</span></div>`).join("");
     $("task-detail").classList.remove("hidden");
     $("task-detail").innerHTML =
       `<div class="row-top"><b>${esc(t.title)}</b>
@@ -266,6 +302,11 @@ async function showTask(taskId) {
                                : "capability: " + (t.assignee_capability || "?"))} · ` +
        `priority ${esc(t.priority)} · created ${esc(fmtTime(t.created_at))}</div>
        ${t.result ? `<div><h4>Result</h4><p>${esc(t.result)}</p></div>` : ""}
+       <div><h4>Participants</h4><div class="chip-row">${participantChips || '<span class="muted">None.</span>'}</div>${participantForm}</div>
+       <div><h4>Discussion</h4><div class="mini-list">${comments || '<span class="muted">No comments yet.</span>'}</div></div>
+       ${terminal ? "" : `<form id="task-comment-form" class="inline-form">
+         <label>Comment <input id="task-comment-text"></label>
+         <button class="btn small" type="submit">Add comment</button></form>`}
        <div><h4>Progress notes</h4><div class="mini-list">${notes || '<span class="muted">None yet.</span>'}</div></div>
        <form id="task-note-form" class="inline-form">
          <label>Add a note <input id="task-note-text"></label>
@@ -280,6 +321,34 @@ async function showTask(taskId) {
         await loadAll(); showTask(t.id);
       } catch (e) { toast(e.message, true); }
     });
+    const commentForm = $("task-comment-form");
+    if (commentForm) commentForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      try {
+        await api(`/tasks/${t.id}/comments`, { method: "POST",
+          body: { body: $("task-comment-text").value } });
+        await loadAll(); showTask(t.id);
+      } catch (e) { toast(e.message, true); }
+    });
+    const partForm = $("task-participant-form");
+    if (partForm) partForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      try {
+        await api(`/tasks/${t.id}/participants`, { method: "POST",
+          body: { agent_id: $("task-participant-add").value } });
+        await loadAll(); showTask(t.id);
+        toast("Participant added.");
+      } catch (e) { toast(e.message, true); }
+    });
+    $("task-detail").querySelectorAll("[data-remove-participant]")
+      .forEach((btn) => btn.addEventListener("click", async () => {
+        try {
+          await api(`/tasks/${t.id}/participants/${btn.dataset.removeParticipant}`,
+                    { method: "DELETE" });
+          await loadAll(); showTask(t.id);
+          toast("Participant removed.");
+        } catch (e) { toast(e.message, true); }
+      }));
     $("task-detail").querySelectorAll("[data-to]").forEach((btn) =>
       btn.addEventListener("click", async () => {
         let result;
@@ -302,6 +371,10 @@ $("task-form").addEventListener("submit", async (ev) => {
                  priority: $("task-priority").value };
   if ($("task-assignee").value) body.assignee_agent = $("task-assignee").value;
   if ($("task-capability").value) body.assignee_capability = $("task-capability").value;
+  const participants = [...document.querySelectorAll(
+    ".task-participant-box:checked")].map((el) => el.value)
+    .filter((id) => id !== body.assignee_agent);
+  if (participants.length) body.participants = participants;
   try {
     const out = await api("/tasks", { method: "POST", body });
     await api(`/tasks/${out.task.id}/transition`,

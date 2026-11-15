@@ -192,6 +192,12 @@ th { color: var(--text-muted); font-size: 11px; text-transform: uppercase; lette
 .inline-form label { flex: 1; min-width: 130px; }
 .checks { display: flex; gap: 12px; align-items: center; font-size: 13px; }
 .checks label { flex-direction: row; align-items: center; gap: 5px; }
+/* v2.2 collaboration: participant multi-select + chip remove buttons */
+.check-list { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; }
+.check-list .check { font-size: 13px; color: var(--ink, #e5e9f2); }
+.chip-x { background: none; border: none; color: inherit; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 0 2px; opacity: .75; }
+.chip-x:hover { opacity: 1; }
 
 /* Phone layout */
 @media (max-width: 760px) {
