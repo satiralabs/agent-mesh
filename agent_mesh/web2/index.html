@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Mesh</title>
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <!-- Login: admin token, kept only in sessionStorage -->
+  <div id="login-screen" class="login-wrap">
+    <form id="login-form" class="card login-card">
+      <div class="brand-icon big">◈</div>
+      <h1>Agent Mesh</h1>
+      <p class="muted">Enter the node admin token to open the control centre.
+        It is kept only in this browser tab's session storage — never saved
+        to disk.</p>
+      <label>Admin token
+        <input type="password" id="login-token" autocomplete="off" required>
+      </label>
+      <button type="submit" class="btn primary">Open Agent Mesh</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <div id="app" class="app hidden">
+    <aside>
+      <div class="brand">
+        <div class="brand-icon">◈</div>
+        <div>
+          <div class="brand-title">Agent Mesh</div>
+          <div class="brand-subtitle">Control Centre</div>
+        </div>
+      </div>
+      <nav id="main-nav">
+        <button class="nav-btn active" data-screen="dashboard"><span class="icon">▦</span>Dashboard</button>
+        <button class="nav-btn" data-screen="agents"><span class="icon">⬢</span>Agents</button>
+        <button class="nav-btn" data-screen="tasks"><span class="icon">✓</span>Tasks</button>
+        <button class="nav-btn" data-screen="messages"><span class="icon">✉</span>Messages</button>
+        <button class="nav-btn" data-screen="vault"><span class="icon">⚿</span>Vault</button>
+        <button class="nav-btn" data-screen="approvals"><span class="icon">✋</span>Approvals<span id="nav-approval-badge" class="badge alert hidden">0</span></button>
+        <button class="nav-btn" data-screen="activity"><span class="icon">≣</span>Activity</button>
+        <button class="nav-btn" data-screen="settings"><span class="icon">⚙</span>Settings</button>
+      </nav>
+      <div class="aside-foot">
+        <span id="node-status" class="status-pill"><span class="dot"></span>node</span>
+        <button id="logout-btn" class="btn small ghost">Lock</button>
+      </div>
+    </aside>
+
+    <main>
+      <header>
+        <h2 id="page-title">Dashboard</h2>
+        <button id="refresh-btn" class="btn small">↻ Refresh</button>
+      </header>
+      <div id="toast" class="toast hidden"></div>
+
+      <!-- 1. Dashboard -->
+      <section id="screen-dashboard" class="screen active">
+        <div class="stat-grid">
+          <div class="card stat"><span class="stat-num" id="stat-agents-online">–</span><span class="stat-label">Agents online</span></div>
+          <div class="card stat"><span class="stat-num" id="stat-agents-busy">–</span><span class="stat-label">Agents busy</span></div>
+          <div class="card stat"><span class="stat-num" id="stat-agents-offline">–</span><span class="stat-label">Agents offline</span></div>
+          <div class="card stat"><span class="stat-num" id="stat-tasks-open">–</span><span class="stat-label">Open tasks</span></div>
+          <div class="card stat"><span class="stat-num" id="stat-approvals">–</span><span class="stat-label">Pending approvals</span></div>
+        </div>
+        <div class="card">
+          <h3>Tasks by status</h3>
+          <div id="dash-task-counts" class="chip-row"></div>
+        </div>
+        <div class="card">
+          <h3>Recent activity</h3>
+          <div id="dash-activity" class="mini-list"></div>
+        </div>
+      </section>
+
+      <!-- 2. Agents -->
+      <section id="screen-agents" class="screen">
+        <div class="card">
+          <h3>Agents</h3>
+          <div id="agents-list"></div>
+        </div>
+        <div class="card">
+          <h3>Add an agent</h3>
+          <form id="agent-form" class="form-grid">
+            <label>Name <input id="agent-name" required placeholder="e.g. Successor (VPS)"></label>
+            <label>Machine <input id="agent-machine" placeholder="e.g. Blitz VPS"></label>
+            <label>Capabilities (comma separated)
+              <input id="agent-caps" placeholder="coding, research, browser"></label>
+            <label>Role
+              <select id="agent-role">
+                <option value="worker">worker</option>
+                <option value="orchestrator">orchestrator</option>
+                <option value="owner">owner</option>
+              </select>
+            </label>
+            <button type="submit" class="btn primary">Add agent &amp; make connection pack</button>
+          </form>
+          <div id="pack-panel" class="hidden">
+            <h4>Connection pack — paste this into the agent's MCP config</h4>
+            <p class="muted">The agent's token appears only inside this pack.
+              Treat it like a password. Making a new pack for an existing
+              agent replaces its old token.</p>
+            <pre id="pack-text" class="code"></pre>
+            <button id="pack-copy" class="btn">Copy pack</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Tasks -->
+      <section id="screen-tasks" class="screen">
+        <div class="card">
+          <h3>Create a task (order an agent)</h3>
+          <form id="task-form" class="form-grid">
+            <label>Title <input id="task-title" required></label>
+            <label>Instructions <textarea id="task-instructions" rows="3"></textarea></label>
+            <label>Assign to agent <select id="task-assignee"></select></label>
+            <label>…or to a capability <input id="task-capability" placeholder="e.g. research"></label>
+            <label>Priority
+              <select id="task-priority">
+                <option>low</option><option selected>normal</option>
+                <option>high</option><option>urgent</option>
+              </select>
+            </label>
+            <button type="submit" class="btn primary">Create &amp; send task</button>
+          </form>
+        </div>
+        <div id="tasks-board"></div>
+        <div id="task-detail" class="card hidden"></div>
+      </section>
+
+      <!-- 4. Messages -->
+      <section id="screen-messages" class="screen">
+        <div class="card">
+          <h3>Send a message (as owner)</h3>
+          <form id="message-form" class="form-grid">
+            <label>To agent <select id="message-recipient"></select></label>
+            <label>Type
+              <select id="message-type">
+                <option>INFO</option><option>QUESTION</option>
+                <option>ANSWER</option><option>HANDOVER_OFFER</option>
+              </select>
+            </label>
+            <label>Message <textarea id="message-text" rows="3" required></textarea></label>
+            <button type="submit" class="btn primary">Send</button>
+          </form>
+        </div>
+        <div class="card">
+          <h3>Recent messages</h3>
+          <div id="messages-list"></div>
+        </div>
+      </section>
+
+      <!-- 5. Vault -->
+      <section id="screen-vault" class="screen">
+        <div class="card">
+          <h3>Add a service credential</h3>
+          <p class="muted">The secret is written once, encrypted by the node,
+            and never shown again — not here, not to any agent.</p>
+          <form id="vault-form" class="form-grid">
+            <label>Service name <input id="vault-name" required placeholder="e.g. shipd"></label>
+            <label>Upstream URL <input id="vault-upstream" placeholder="https://api.example.com"></label>
+            <label>Secret / API key <input type="password" id="vault-secret" required autocomplete="off"></label>
+            <label class="check"><input type="checkbox" id="vault-gated"> Every use needs my approval</label>
+            <button type="submit" class="btn primary">Save credential</button>
+          </form>
+        </div>
+        <div class="card">
+          <h3>Services</h3>
+          <div id="vault-list"></div>
+        </div>
+      </section>
+
+      <!-- 6. Approvals -->
+      <section id="screen-approvals" class="screen">
+        <div class="card">
+          <h3>Waiting for your decision</h3>
+          <div id="approvals-pending"></div>
+        </div>
+        <div class="card">
+          <h3>History</h3>
+          <div id="approvals-history"></div>
+        </div>
+      </section>
+
+      <!-- 7. Activity -->
+      <section id="screen-activity" class="screen">
+        <div class="card">
+          <h3>Audit trail</h3>
+          <p class="muted">Vault use, approvals and task events. Secrets never appear here.</p>
+          <div id="activity-list"></div>
+        </div>
+      </section>
+
+      <!-- 8. Settings -->
+      <section id="screen-settings" class="screen">
+        <div class="card">
+          <h3>Node</h3>
+          <div id="settings-node" class="mini-list"></div>
+          <button id="settings-lock" class="btn">Lock (forget admin token on this tab)</button>
+        </div>
+        <div class="card">
+          <h3>Connecting another machine (Phase 4)</h3>
+          <p class="muted">Cross-machine pairing arrives in Phase 4: each
+            machine will run its own node, show a pairing code / QR here,
+            and you approve it on a machine already in your mesh. Until
+            then, this node serves agents on this machine and any agent
+            that can reach this node's URL with its own token.</p>
+        </div>
+        <div class="card">
+          <h3>Desktop app</h3>
+          <p class="muted">A Tauri desktop wrapper for this exact GUI lives
+            in the repo under <code>desktop/</code> — see
+            <code>desktop/DESKTOP.md</code> for build commands per OS.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

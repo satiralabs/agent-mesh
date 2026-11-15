@@ -92,3 +92,34 @@ class MeshClient:
     def vault_use_check(self, service: str, action: str = "read"):
         return self._call("POST", "/vault/use-check",
                           {"service": service, "action": action})
+
+    # vault admin (Phase 3 GUI paths)
+    def vault_update_service(self, service: str, **kw):
+        return self._call("PUT", f"/vault/services/{service}", kw, admin=True)
+
+    def vault_delete_service(self, service: str):
+        return self._call("DELETE", f"/vault/services/{service}", admin=True)
+
+    # approvals (Phase 3)
+    def approvals_list(self, status: Optional[str] = None):
+        q = f"?status={status}" if status else ""
+        return self._call("GET", "/approvals" + q, admin=True)
+
+    def approval_decide(self, approval_id: str, approve: bool):
+        return self._call("POST", f"/approvals/{approval_id}/decide",
+                          {"decision": "approve" if approve else "deny"},
+                          admin=True)
+
+    def approval_request(self, service: str, action: str = "read"):
+        return self._call("POST", "/approvals",
+                          {"service": service, "action": action})
+
+    # activity + packs (Phase 3)
+    def activity(self, limit: int = 100):
+        return self._call("GET", f"/activity?limit={limit}", admin=True)
+
+    def agent_pack(self, agent_id: str):
+        return self._call("POST", f"/agents/{agent_id}/pack", {}, admin=True)
+
+    def register_with_pack(self, **kw):
+        return self._call("POST", "/agents/pack", kw, admin=True)

@@ -1,0 +1,15 @@
+[package]
+name = "agent-mesh-desktop"
+version = "2.0.0"
+description = "Agent Mesh desktop app — a window on the local mesh node, with the Python node spawned as a sidecar process"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dependencies]
+tauri = { version = "2" }
+
+[profile.release]
+lto = true
+codegen-units = 1

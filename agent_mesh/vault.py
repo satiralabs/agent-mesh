@@ -62,6 +62,9 @@ class Vault:
                  passphrase: Optional[str] = None):
         self.store_path = store_path
         self.audit_path = audit_path
+        # Optional approvals store (Phase 3): when set, an approved and
+        # not-yet-consumed approval lets one gated use through.
+        self.approvals = None
         self._passphrase = load_master_passphrase(passphrase)
         os.makedirs(os.path.dirname(os.path.abspath(store_path)),
                     exist_ok=True)
@@ -150,6 +153,36 @@ class Vault:
         }
         self._save()
 
+    def update_service(self, service: str, acl: Optional[Dict[str, Any]] = None,
+                       requires_approval: Optional[bool] = None,
+                       upstream: Optional[str] = None) -> None:
+        """Change a service's ACL / approval flag / upstream WITHOUT
+        touching its stored secret (GUI ACL editor path)."""
+        cfg = self._data["services"].get(service)
+        if cfg is None:
+            raise KeyError(f"service not found: {service}")
+        if acl is not None:
+            clean_acl: Dict[str, Any] = {}
+            for agent_id, actions in acl.items():
+                bad = [a for a in actions if a not in ACTIONS]
+                if bad:
+                    raise ValueError(
+                        f"unknown actions {bad}; allowed {ACTIONS}")
+                clean_acl[agent_id] = list(actions)
+            cfg["acl"] = clean_acl
+        if requires_approval is not None:
+            cfg["requires_approval"] = bool(requires_approval)
+        if upstream is not None:
+            cfg["upstream"] = upstream
+        self._save()
+
+    def delete_service(self, service: str) -> bool:
+        if service not in self._data["services"]:
+            return False
+        del self._data["services"][service]
+        self._save()
+        return True
+
     def get_secret(self, service: str) -> Optional[str]:
         """Node-internal broker use ONLY. Never expose over HTTP."""
         cfg = self._data["services"].get(service)
@@ -179,7 +212,13 @@ class Vault:
         elif action not in cfg.get("acl", {}).get(agent_id, []):
             outcome = "deny"
         elif cfg.get("requires_approval"):
-            outcome = "needs_approval"
+            # One approved, unconsumed approval lets exactly one use
+            # through; after that the service is gated again.
+            if self.approvals is not None and self.approvals.consume_approved(
+                    agent_id, service, action):
+                outcome = "allow"
+            else:
+                outcome = "needs_approval"
         else:
             outcome = "allow"
         self.audit(agent_id, service, action, outcome)

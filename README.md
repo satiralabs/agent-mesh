@@ -209,3 +209,56 @@ task create → accept → progress → review → done, plus messages and a
 vault decision — through two real MCP server subprocesses, and cover
 the file-drop adapter, the CLI shim and the pack generator, including a
 scan proving no secret appears in any MCP response.
+
+## v2 Phase 3 — the GUI: no terminal needed
+
+Phase 3 turns the node into a fully GUI tool, and adds the approvals
+queue that Phase 1 deferred.
+
+### Run it (the only terminal step left — starting the node)
+
+```bash
+export AGENT_MESH_ADMIN='your-node-admin-token'
+export AGENT_MESH_MASTER='your-vault-master-passphrase'
+python3 -m agent_mesh.node --port 8790
+```
+
+Then open **http://127.0.0.1:8790/** in a browser and enter the admin
+token. The token is kept only in the browser tab's session storage —
+never saved to disk, never in the page. Everything after this is
+clicks. (The v1 broker page is still served, at `/v1`.)
+
+### The 8 screens
+
+| Screen | What it does |
+|---|---|
+| **Dashboard** | Agents online / busy / offline, open tasks, pending approvals, tasks by status, recent activity |
+| **Agents** | Who is registered, their status, capabilities, role and last-seen. Add an agent and get its **connection pack** (the MCP config snippet, with a copy button). Making a new pack for an existing agent rotates its token — the old one stops working |
+| **Tasks** | Create and send a task to an agent or a capability; board grouped by status; click a task for its progress notes and result, add notes, and use the owner actions (approve a review → Done, Fail) |
+| **Messages** | Send a message as owner to any agent; read recent traffic across the mesh |
+| **Vault** | Add a credential (write-only — it is encrypted by the node and never shown again), set **who may use it** (per agent: read / write / spend) and whether every use needs approval, test a use as a chosen agent, delete a service |
+| **Approvals** | When an agent tries to use a gated service, its request waits here. **Approve once** lets exactly that one use through — the next use asks again. Deny grants nothing. Decided history below |
+| **Activity** | The audit trail: vault use-checks, approval requests / decisions / consumption, and task events. Secrets never appear here |
+| **Settings** | Node info, lock (forget the token on this tab), and the Phase 4 note on pairing other machines |
+
+### Approvals, in the API
+
+`POST /vault/use-check` for a gated service now also creates a pending
+approval (`approval_id` in the reply). `GET /approvals` (admin) lists
+them, `POST /approvals/{id}/decide` with `{"decision": "approve"|"deny"}`
+decides, and `GET /activity` returns recent audit entries as JSON. An
+approval is consumed by the first allowed use — it is not a standing
+permission.
+
+### Desktop app (Tauri)
+
+A Tauri 2 scaffold that spawns this node and opens this same GUI in a
+desktop window lives in **`desktop/`** — see
+[`desktop/DESKTOP.md`](desktop/DESKTOP.md) for prerequisites and the
+exact build commands per OS. It is a scaffold: it has **not** been
+compiled yet (the Phase 3 build machine has no Rust toolchain).
+
+Phase 3 tests (`tests/test_phase3.py`) cover GUI serving, the full
+approval flow (deny grants nothing; approve grants exactly one use),
+the activity endpoint, the vault admin endpoints and the pack endpoint,
+with the dummy secret scanned out of every response.

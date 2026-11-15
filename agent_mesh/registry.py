@@ -79,6 +79,20 @@ class Registry:
         conn.close()
         return self._public(row), token
 
+    def rotate_token(self, agent_id: str) -> Optional[str]:
+        """Issue a fresh token for an existing agent (old token stops
+        working). Used when generating a new connection pack from the
+        GUI — the pack is the only place the new token appears."""
+        token = secrets.token_urlsafe(32)
+        conn = self._conn()
+        with conn:
+            cur = conn.execute(
+                "UPDATE agents SET token_hash=?, last_seen=? WHERE id=?",
+                (_hash(token), time.time(), agent_id))
+            changed = cur.rowcount
+        conn.close()
+        return token if changed else None
+
     def authenticate(self, token: Optional[str]) -> Optional[Dict[str, Any]]:
         if not token:
             return None
