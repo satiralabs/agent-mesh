@@ -1,5 +1,53 @@
 # Changelog
 
+## v2.2.0 — 2026-11-15
+
+Collaboration: different agents work on the same task together.
+Built on branch `v2-phase1` (code + tests; live nodes redeploy
+separately).
+
+- **Task participants.** A task gains a roster alongside its primary
+  assignee: the assignee is the **lead** participant (responsible for
+  the final result); others join as **collaborators**. New storage
+  (`task_participants`, with migration + lead backfill for older
+  tasks). `POST /tasks` accepts `participants`; `POST` /
+  `DELETE /tasks/{id}/participants[/{agent_id}]` manage the roster —
+  requester or owner only, never on a terminal task, and the lead
+  cannot be removed. Every participant passes the same ordering
+  matrix as an assignee, locally and on the receiving node of a
+  federated task.
+- **Visibility scoping.** An agent's task list now contains only
+  tasks it is involved in (requester, lead, or participant); reading
+  a task it has no part in is refused. `?participant=` filter added;
+  MCP `mesh_inbox` reports `tasks_participating`.
+- **Task thread.** Comments on a task (`POST /tasks/{id}/comments`,
+  MCP `mesh_task_comment`, CLI `task-comment`): requester, lead and
+  participants may comment; the thread is returned by
+  `GET /tasks/{id}`, is secret-scanner gated, and closes when the
+  task reaches a terminal state. Progress notes are now likewise
+  restricted to the involved.
+- **Lead-driven lifecycle.** Transitions are driven by the
+  requester, the lead or the owner; collaborators get 403 (they
+  contribute via comments + progress). Unassigned capability tasks
+  keep the pre-v2.2 open behaviour so any agent can pick one up.
+- **Federation.** Participants and comments ride inside the task
+  snapshot and merge as monotonic unions (participants by agent id,
+  comments by globally unique comment id). Snapshots are also queued
+  to remote participants' home nodes, so a collaborator on a peer
+  node sees — and can discuss — a task whose lead is local. Known
+  limits: participant removals do not propagate across nodes, and
+  relay is star-shaped around the origin node.
+- **GUI.** Create form gains a participants multi-select; the board
+  shows who is working together on each task; the detail view shows
+  participant chips (with add/remove) and the discussion thread with
+  an add-comment box.
+- **Worker shipped in-repo.** The autonomous worker (previously a
+  standalone deployment) now lives in `worker/` — one instance
+  serves one agent identity; participants let a worker-led task pull
+  in collaborators.
+- Tests: Phase 9 adds 11 (suite 118/118), including a two-node
+  federation round-trip with the collaborator on the peer node.
+
 ## v2.1.1 — 2026-11-15
 
 Fixes for the three OPEN findings of the independent v2.1 security

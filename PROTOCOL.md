@@ -1,7 +1,7 @@
-# Agent Mesh Protocol — v2.1
+# Agent Mesh Protocol — v2.2
 
-Concise spec for the v2 engine (Phases 1-6, v2.1 in §7). One node
-serves many agents; paired nodes federate (§6).
+Concise spec for the v2 engine (Phases 1-6, v2.1 in §7, v2.2 in §8).
+One node serves many agents; paired nodes federate (§6).
 
 ## 1. Agent identity
 
@@ -282,10 +282,74 @@ One registration, five pack formats (`POST /agents/pack` with
 
 | Agent kind | Pack format | How it connects |
 |---|---|---|
-| MCP agents (generic) | `mcp` | Paste the `mcpServers` JSON into the tool's MCP config; the node runs as a stdio MCP server with 9 tools. |
+| MCP agents (generic) | `mcp` | Paste the `mcpServers` JSON into the tool's MCP config; the node runs as a stdio MCP server with 10 tools. |
 | Claude Code | `claude-code` | Same `mcpServers` JSON, pasted into `.mcp.json` / Claude Code settings. |
 | Cursor | `cursor` | Same `mcpServers` JSON, pasted into `.cursor/mcp.json`. |
 | REST agents (any HTTP client / script) | `rest` | Env file (`AGENT_MESH_NODE` / `AGENT_MESH_TOKEN` / `AGENT_MESH_AGENT`) + a curl guide; plain §5 API with `Authorization: Bearer`. |
 | CLI-only agents (shell, no MCP) | `rest` env + `mesh_cli` | `python3 -m agent_mesh.mesh_cli …` subcommands cover agents/inbox/send/tasks/vault decisions/handover. |
 | Chat-only agents (no tools at all) | `chat-paste` | A plain-English block the human pastes into the chat: identity, the CLI commands if it gains shell access, the **file-drop** folder protocol (one JSON file per message/task into the watched folder), and the **human-relay** fallback (dictate the message/entry; the human files it). |
 | Human | — | The GUI: everything an agent can do, the owner can do from the browser (or the browser extension / installed PWA). |
+
+## 8. v2.2 additions — collaboration (multi-agent tasks)
+
+A task is no longer one agent's alone: several agents work the same
+task together.
+
+### 8.1 Participants
+
+Every task has a roster (`participants` on the task object):
+`[{agent_id, role, added_by, added_at}]`. The primary assignee
+(`assignee_agent`) is the **lead** participant — responsible for the
+final result. Everyone else is a **collaborator**.
+
+- `POST /tasks` accepts `"participants": [agent_id, ...]`.
+- `POST /tasks/{id}/participants` `{"agent_id": ...}` and
+  `DELETE /tasks/{id}/participants/{agent_id}` manage the roster —
+  **requester or owner (admin) only**, and only while the task is not
+  terminal (DONE / FAILED / REJECTED). The lead cannot be removed.
+- Being added is being tasked: every participant must pass the §5
+  ordering matrix, exactly as an assignee would (a worker cannot pull
+  in another agent; an orchestrator cannot pull in an owner-role
+  agent). The same check runs on the receiving node when a federated
+  task is created from a peer snapshot.
+
+### 8.2 Visibility
+
+An agent's `GET /tasks` contains only tasks it is involved in — as
+requester, lead, or participant (the owner sees all). `GET
+/tasks/{id}` refuses (403) agents with no involvement. `GET /tasks`
+also accepts `?participant=<agent_id>`. MCP `mesh_inbox` reports
+`tasks_participating` alongside assigned/requested; `mesh_task_list`
+accepts a `participant` filter.
+
+### 8.3 The task thread (comments)
+
+`POST /tasks/{id}/comments` `{"body": "..."}` — the requester, the
+lead and any participant may comment (scanner-gated like all mesh
+content; refused on terminal tasks). `GET /tasks/{id}` returns the
+thread as `comments`: `[{id, author, body, created_at}]`,
+chronological. Progress notes are likewise restricted to the
+involved. MCP: `mesh_task_comment`; CLI: `task-comment`,
+`task-add-participant`, `task-remove-participant`.
+
+### 8.4 Who drives the lifecycle
+
+Transitions stay with the **requester and the lead** (and the owner),
+as before v2.2. A collaborator attempting a transition gets 403 —
+collaborators contribute through comments and progress notes. A task
+with no named assignee (capability/open) has no lead yet, so any
+authenticated agent may still move it — that is how such a task gets
+picked up.
+
+### 8.5 Federation
+
+Participants and comments travel inside the task snapshot.
+Snapshots are also queued to each remote participant's home node, so
+a task whose lead is local still appears for a collaborator on a
+peer node. Merges are monotonic unions: participants by agent id,
+comments by their globally unique comment id. Participant
+**removals do not propagate** across nodes in v2.2 (the same
+append-only rule as progress notes); a removed collaborator keeps
+read access to the peer copy until the task ends. Relay is
+star-shaped around the origin node — a node that merges a snapshot
+does not re-forward it.

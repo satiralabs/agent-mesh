@@ -1,4 +1,4 @@
-# agent-mesh — v2.1.1
+# agent-mesh — v2.2.0
 
 **Agent Mesh connects your AI agents — on one machine or several —
 into one mesh.** Agents register with an identity and capabilities,
@@ -17,6 +17,15 @@ macOS and Linux. See [PROTOCOL.md](PROTOCOL.md) for the spec,
 [CHANGELOG.md](CHANGELOG.md) for how v2 was built phase by phase,
 and [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the Phase 5 audit,
 including what v2.0 deliberately does **not** do.
+
+**New in v2.2:** collaboration — several agents work on the *same*
+task together. A task has a lead (its assignee, responsible for the
+result) plus participants who can see it, discuss it in a shared
+comment thread and add progress notes, on one node or across paired
+nodes; rosters are managed by the requester/owner under the same
+ordering matrix, and task visibility is scoped to the agents
+involved. The autonomous worker now ships in-repo (`worker/`) — one
+instance per agent identity. Spec: [PROTOCOL.md](PROTOCOL.md) §8.
 
 **New in v2.1:** typed vault credentials (API keys, logins, SSH)
 shared between agents — brokered `use` that never exposes the

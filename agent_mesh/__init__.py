@@ -3,4 +3,4 @@ agent-mesh: Ultra-lightweight, zero-cost, secure agent communication,
 handover synchronization, and secret-brokering toolkit.
 """
 
-__version__ = "2.1.1"
+__version__ = "2.2.0"
