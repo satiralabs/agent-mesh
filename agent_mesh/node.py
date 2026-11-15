@@ -629,7 +629,9 @@ def make_handler(node: Node):
                     if not body.get("node_id") or not body.get("url"):
                         return self._send(
                             400, {"error": "node_id and url required"})
-                    if not node.peers.consume_code(body.get("code", "")):
+                    if not node.peers.consume_code(
+                            body.get("code", ""),
+                            source=self.client_address[0]):
                         return self._send(
                             403, {"error": "invalid, expired or already "
                                            "used pairing code"})

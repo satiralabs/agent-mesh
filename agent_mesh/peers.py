@@ -23,6 +23,8 @@ from .registry import presence_state
 
 TS_WINDOW_SEC = 300  # reject peer requests whose timestamp is older
 DEFAULT_CODE_TTL_SEC = 900  # pairing codes live at most 15 minutes
+CODE_BYTES = 8  # pairing codes are 64-bit: 16 hex chars from a CSPRNG
+MAX_PAIR_FAILURES = 5  # failed attempts from one source burn live codes
 DEFAULT_RETRY_SCHEDULE = (1.0, 5.0, 15.0, 60.0)
 DEFAULT_MAX_ATTEMPTS = 100
 
@@ -116,6 +118,12 @@ class PeerStore:
                     used INTEGER NOT NULL DEFAULT 0
                 )""")
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS pairing_failures (
+                    source TEXT PRIMARY KEY,
+                    failures INTEGER NOT NULL DEFAULT 0,
+                    last_at REAL NOT NULL DEFAULT 0
+                )""")
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS outbox (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     peer_node_id TEXT NOT NULL,
@@ -154,7 +162,9 @@ class PeerStore:
 
     # -- pairing codes ----------------------------------------------------
     def create_code(self, ttl_sec: float = DEFAULT_CODE_TTL_SEC):
-        code = secrets.token_hex(4).upper()  # 8 hex chars, e.g. 9F3AC21B
+        # 64-bit code (16 hex chars) from the CSPRNG — audit F3: the old
+        # 32-bit codes were the weakest link in the pairing story.
+        code = secrets.token_hex(CODE_BYTES).upper()
         expires = time.time() + ttl_sec
         conn = self._conn()
         with conn:
@@ -165,22 +175,57 @@ class PeerStore:
         conn.close()
         return code, expires
 
-    def consume_code(self, code: str) -> bool:
-        """True exactly once for a live code; False for wrong/expired/used."""
-        if not code:
-            return False
-        digest = hashlib.sha256(code.strip().upper().encode()).hexdigest()
+    def consume_code(self, code: str, source: str = "") -> bool:
+        """True exactly once for a live code; False for wrong/expired/used.
+
+        Failed attempts are counted per `source` (the caller's network
+        address, passed by the /peer/pair handler). At MAX_PAIR_FAILURES
+        failures from one source, every outstanding live code is burned
+        (marked used) — brute-forcing a code then requires the owner to
+        mint a fresh one, which puts a human back in the loop. A
+        successful consume clears the source's counter, and the counter
+        also resets when it triggers a burn, so a legitimate peer that
+        shares the source address is not locked out of the NEXT code."""
+        digest = None
+        if code:
+            digest = hashlib.sha256(
+                code.strip().upper().encode()).hexdigest()
         conn = self._conn()
+        ok = False
         with conn:
-            row = conn.execute(
-                "SELECT * FROM pairing_codes WHERE code_hash=?",
-                (digest,)).fetchone()
-            if row is None or row["used"] or row["expires_at"] < time.time():
-                return False
-            conn.execute("UPDATE pairing_codes SET used=1 WHERE code_hash=?",
-                         (digest,))
+            row = None
+            if digest is not None:
+                row = conn.execute(
+                    "SELECT * FROM pairing_codes WHERE code_hash=?",
+                    (digest,)).fetchone()
+            if row is not None and not row["used"] \
+                    and row["expires_at"] >= time.time():
+                conn.execute(
+                    "UPDATE pairing_codes SET used=1 WHERE code_hash=?",
+                    (digest,))
+                conn.execute(
+                    "DELETE FROM pairing_failures WHERE source=?",
+                    (source,))
+                ok = True
+            else:
+                # Failure: wrong, expired, already used, or missing code.
+                conn.execute(
+                    "INSERT INTO pairing_failures (source, failures,"
+                    " last_at) VALUES (?,1,?) ON CONFLICT(source)"
+                    " DO UPDATE SET failures=failures+1,"
+                    " last_at=excluded.last_at",
+                    (source, time.time()))
+                failures = conn.execute(
+                    "SELECT failures FROM pairing_failures WHERE source=?",
+                    (source,)).fetchone()["failures"]
+                if failures >= MAX_PAIR_FAILURES:
+                    conn.execute(
+                        "UPDATE pairing_codes SET used=1 WHERE used=0")
+                    conn.execute(
+                        "DELETE FROM pairing_failures WHERE source=?",
+                        (source,))
         conn.close()
-        return True
+        return ok
 
     # -- peers --------------------------------------------------------------
     def add_peer(self, peer_node_id: str, name: str, url: str,

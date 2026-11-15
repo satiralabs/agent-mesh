@@ -24,7 +24,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent_mesh.client import MeshClient, MeshError  # noqa: E402
-from agent_mesh.peers import PeerStore  # noqa: E402
+from agent_mesh.peers import MAX_PAIR_FAILURES, PeerStore  # noqa: E402
 from agent_mesh.scan import scan_text  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -172,6 +172,81 @@ class TestDirectoryPushF6(DirectoryPushFixture):
         wait_for(lambda: (self.remote_copy_on_b(agent_id) or {})
                  .get("status") == "online",
                  desc="B sees the agent back online after rotation push")
+
+
+# ----------------------------------------------------------------------
+# F3 — pairing codes >=64-bit + burn after 5 failed attempts
+# ----------------------------------------------------------------------
+class TestPairingCodesF3(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="agent-mesh-p8-peers-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = PeerStore(os.path.join(self.dir, "peers.db"))
+
+    def test_codes_are_at_least_64_bit_hex(self):
+        code, _ = self.store.create_code()
+        self.assertGreaterEqual(len(code), 16)  # 16 hex chars = 64 bits
+        self.assertTrue(all(c in "0123456789ABCDEF" for c in code))
+        other, _ = self.store.create_code()
+        self.assertNotEqual(code, other)
+
+    def test_consume_once_then_reuse_and_expired_refused(self):
+        code, _ = self.store.create_code()
+        self.assertTrue(self.store.consume_code(code, source="owner"))
+        self.assertFalse(self.store.consume_code(code, source="owner"))
+        stale, _ = self.store.create_code(ttl_sec=-1)
+        self.assertFalse(self.store.consume_code(stale, source="owner"))
+
+    def test_failures_below_threshold_do_not_burn(self):
+        code, _ = self.store.create_code()
+        for _ in range(MAX_PAIR_FAILURES - 1):
+            self.assertFalse(self.store.consume_code(
+                "WRONGWRONGWRONG1", source="attacker"))
+        # 4 failures from someone else: the owner's first try still works.
+        self.assertTrue(self.store.consume_code(code, source="owner"))
+
+    def test_five_failures_burn_live_codes_then_fresh_code_works(self):
+        code, _ = self.store.create_code()
+        for _ in range(MAX_PAIR_FAILURES):
+            self.assertFalse(self.store.consume_code(
+                "WRONGWRONGWRONG1", source="attacker"))
+        # Burned: even the correct code, from a legitimate source, is dead.
+        self.assertFalse(self.store.consume_code(code, source="owner"))
+        # A fresh code pairs first-try (the burn is not a lockout).
+        fresh, _ = self.store.create_code()
+        self.assertTrue(self.store.consume_code(fresh, source="owner"))
+
+
+class TestPairingBurnOverHttp(unittest.TestCase):
+    def test_wrong_codes_burn_then_fresh_code_pairs(self):
+        dir_e = tempfile.mkdtemp(prefix="agent-mesh-p8e-")
+        dir_f = tempfile.mkdtemp(prefix="agent-mesh-p8f-")
+        proc_e = proc_f = None
+        try:
+            proc_e, base_e = start_node(free_port(), dir_e, "Node E",
+                                        ADMIN_A)
+            proc_f, base_f = start_node(free_port(), dir_f, "Node F",
+                                        ADMIN_B)
+            admin_e = MeshClient(base_e, admin_token=ADMIN_A)
+            admin_f = MeshClient(base_f, admin_token=ADMIN_B)
+            node_e = admin_e.node_info()["node_id"]
+            code = admin_e.pairing_code()["code"]
+            self.assertGreaterEqual(len(code), 16)
+            for _ in range(MAX_PAIR_FAILURES):
+                with self.assertRaises(MeshError):
+                    admin_f.pair_with(base_e, "0000000000000000")
+            with self.assertRaises(MeshError):  # burned by the failures
+                admin_f.pair_with(base_e, code)
+            fresh = admin_e.pairing_code()["code"]
+            out = admin_f.pair_with(base_e, fresh)  # first-try succeeds
+            self.assertEqual(out["peer"]["node_id"], node_e)
+        finally:
+            if proc_e:
+                stop_node(proc_e)
+            if proc_f:
+                stop_node(proc_f)
+            shutil.rmtree(dir_e, ignore_errors=True)
+            shutil.rmtree(dir_f, ignore_errors=True)
 
 
 if __name__ == "__main__":
