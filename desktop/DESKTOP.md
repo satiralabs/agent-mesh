@@ -1,81 +1,94 @@
-# Agent Mesh — Desktop app (Tauri 2 scaffold)
+# Agent Mesh — Desktop app (Tauri 2)
 
-**Status: SCAFFOLD ONLY — NOT COMPILED.** The machine that built Phase 3
-has no Rust toolchain (`cargo: command not found`, checked 2026-11-15),
-so nothing here has been built or run. The scaffold is complete and
-ready to build on any machine with the prerequisites below; the commands
-are exact, but treat the first build as unverified until it has run once.
+**Status: BUILT AND RELEASED.** The desktop app is compiled by GitHub
+Actions (`.github/workflows/desktop-release.yml`, manual trigger) on
+Linux, Windows and macOS runners, and the installers are attached to
+the GitHub Release:
 
-## What it is
+**https://github.com/satiralabs/agent-mesh/releases/tag/v2.2.2**
 
-A thin Tauri 2 shell around the Phase 3 web GUI:
+- Windows: `Agent.Mesh_2.2.2_x64_en-US.msi` or
+  `Agent.Mesh_2.2.2_x64-setup.exe` (NSIS)
+- macOS: `Agent.Mesh_2.2.2_universal.dmg` (universal — Apple Silicon
+  and Intel)
+- Linux: `Agent.Mesh_2.2.2_amd64.AppImage` or
+  `Agent.Mesh_2.2.2_amd64.deb`
 
-- `src-tauri/src/main.rs` spawns the Python node as a sidecar process
-  (`python3 -m agent_mesh.node --port 8790`), waits for its port, and
-  the window (configured in `src-tauri/tauri.conf.json`) opens the GUI
-  at `http://127.0.0.1:8790/`. Closing the app kills the node.
-- Admin token: if `AGENT_MESH_ADMIN` is set it is used as-is. Otherwise
-  the shell generates one and writes it to
-  `~/.agent-mesh-node/desktop-admin-token.txt` — open that file and type
-  the token into the GUI's login screen.
-- The vault also needs `AGENT_MESH_MASTER` in the environment (same as
-  running the node by hand).
+The binaries are **unsigned** (no code-signing certificate), so each OS
+shows a warning on first launch:
 
-## App icon (done in Phase 5)
+- **Windows:** SmartScreen — click "More info" → "Run anyway".
+- **macOS:** Gatekeeper — right-click the app → "Open" (the first
+  time; afterwards it opens normally).
+- **Linux:** for the AppImage, `chmod +x Agent.Mesh_*.AppImage` once,
+  then run it.
 
-`src-tauri/icons/` now holds a real icon set, wired into
-`tauri.conf.json` (`bundle.icon`): `32x32.png`, `128x128.png`,
-`128x128@2x.png` (256), `icon.png` (512) and a multi-size `icon.ico`,
-plus `icon.svg` as the editable source. The mark — a hub node linked to
-five satellite nodes in the v1 palette — is drawn by
-`desktop/make-icon.py` (Pillow): edit the geometry there (or the SVG)
-and re-run `python3 desktop/make-icon.py`. One gap remains: no
-`icon.icns` (macOS) is checked in — on a Mac build machine, run
-`cargo tauri icon src-tauri/icons/icon.png` once to generate it (and
-refresh the PNG set) before bundling.
+## What it does
 
-## Remaining packaging gap (honest)
+A thin Tauri 2 shell around the web GUI. The window opens
+`http://127.0.0.1:8790/`. What happens behind it depends on the machine:
 
-**Python runtime bundling is NOT done.** The desktop app still needs a
-system Python 3.11+ on PATH with Agent Mesh importable, and the vault
-master passphrase still comes from the environment / a 0600 key file —
-there is no bundled interpreter and no OS-keystore integration yet.
-That is the main thing standing between this scaffold and a
-double-click installer for a machine with nothing on it.
+1. **A node is already serving on port 8790** (for example the
+   systemd `--user` service from `installers/install-linux.sh`): the
+   app is a **pure window**. It spawns nothing and kills nothing on
+   exit — your node, its data and its tokens are untouched.
+2. **No node is serving, but `~/.agent-mesh-node/node.env` exists:**
+   the app spawns the Python node with exactly that configuration —
+   every `KEY=VALUE` pair from `node.env` is passed as environment
+   (admin token, vault master passphrase) and the existing data dir
+   (`~/.agent-mesh-node/data`, when present) is passed as `--data-dir`,
+   mirroring the installed service. No token is generated and no token
+   file is touched: the app starts *your* node, never a blank rival.
+   Closing the app kills only the node it spawned.
+3. **No node config at all** (fresh machine): the app generates an
+   admin token, writes it to
+   `~/.agent-mesh-node/desktop-admin-token.txt` (type it into the
+   GUI's login screen), and spawns the node with it. If
+   `AGENT_MESH_ADMIN` is set in the environment it is used as-is.
 
-## Prerequisites (all platforms)
+## Honest remainder
+
+**Python runtime bundling is NOT done.** In the spawn cases (2 and 3)
+the app still needs a system Python 3.11+ on PATH with Agent Mesh
+importable (`pip install .` from the repo root, or `PYTHONPATH`
+pointing at it), and the vault master passphrase comes from
+`node.env` / the environment — there is no bundled interpreter and no
+OS-keystore integration yet. On a machine already running a node
+(case 1) none of that matters: the app is just a window.
+
+## App icon
+
+`src-tauri/icons/` holds the icon set wired into `tauri.conf.json`
+(`bundle.icon`): `32x32.png`, `128x128.png`, `128x128@2x.png` (256),
+`icon.png` (512) and a multi-size `icon.ico`, plus `icon.svg` as the
+editable source. The mark — a hub node linked to five satellite nodes
+in the v1 palette — is drawn by `desktop/make-icon.py` (Pillow). The
+macOS `icon.icns` is not checked in; CI generates the full set before
+every build with `tauri icon desktop/src-tauri/icons/icon.png`.
+
+## Building from source
+
+Prerequisites:
 
 - Rust: install via https://rustup.rs
 - Tauri CLI: `cargo install tauri-cli --version "^2"`
-- Python 3.11+ on PATH, with Agent Mesh installed:
-  from the repo root, `pip install .` (or run with
-  `PYTHONPATH=<repo root>` in the environment)
-- App icon: already generated (see "App icon" above) — nothing to do
-  except the macOS `.icns` step noted there.
-
-Platform extras:
-
-- **Windows:** Microsoft C++ Build Tools (MSVC) + WebView2 runtime
-  (pre-installed on Windows 11; the installer can add it on Windows 10).
-- **Linux (Debian/Ubuntu):**
-  `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`
-- **macOS:** Xcode Command Line Tools (`xcode-select --install`).
-
-## Build commands
+- Python 3.11+ on PATH, with Agent Mesh installed (see above)
+- Platform extras:
+  - **Windows:** Microsoft C++ Build Tools (MSVC) + WebView2 runtime
+    (pre-installed on Windows 11; the installer can add it on
+    Windows 10).
+  - **Linux (Debian/Ubuntu):**
+    `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf`
+  - **macOS:** Xcode Command Line Tools (`xcode-select --install`).
 
 Run from the `desktop/` folder:
 
 ```bash
-cargo tauri dev     # development run (hot window on the live node)
-cargo tauri build   # release bundles
+cargo tauri dev     # development run
+cargo tauri build   # release bundles for the OS you are on
 ```
 
 Bundle targets are configured in `tauri.conf.json` for all three OSes;
-Tauri builds only the targets valid on the machine you run it on:
-
-- Windows → `.msi` and NSIS `.exe` under `src-tauri/target/release/bundle/`
-- Linux → `.deb` and `.AppImage` under the same folder
-- macOS → `.app` and `.dmg` under the same folder
-
-So producing all installers takes one build machine per OS (or CI) —
-there is no cross-compiling the bundles from a single OS.
+Tauri builds only the targets valid on the machine you run it on, so
+producing all installers takes one build machine per OS — which is
+what the GitHub Actions workflow does.
