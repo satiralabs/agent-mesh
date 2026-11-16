@@ -1,6 +1,6 @@
 [package]
 name = "agent-mesh-desktop"
-version = "2.2.0"
+version = "2.2.1"
 description = "Agent Mesh desktop app — a window on the local mesh node, with the Python node spawned as a sidecar process"
 edition = "2021"
 

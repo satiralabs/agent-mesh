@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.2.1 — 2026-11-15
+
+Brand + GUI polish release.
+
+- **New logo.** A hexagonal node-mesh mark — six satellites around a
+  highlighted hub, indigo → cyan gradient links, light-slate nodes —
+  designed for the dark glass surfaces and legible at 20px.
+  `logo.svg` (mark) and `logo-lockup.svg` (mark + wordmark) are the
+  sources of truth; `make-logo.py` regenerates every render: PNGs at
+  512/192/64/32, the PWA/favicon set, the browser-extension icons and
+  the Tauri icon set (all now the new mark).
+- **GUI cleanup.** One page title per screen; card headings that
+  duplicated it are gone. Explanatory paragraphs were deleted or cut
+  to a single line, with the detail moved into `title=` tooltips.
+  Login is a centred glass card with the logo, one line, one field,
+  one button. The sidebar is slimmer and carries the logo instead of
+  a glyph; an 8pt spacing scale, wider padding and a 1180px content
+  cap give the screens air; stat tiles are bigger; list rows and
+  table separators are lighter; status pills are smaller. Long ids
+  render truncated (full value in the tooltip). Rarely used form
+  fields (capability / participants / priority, message type, agent
+  machine / capabilities) now live under a "More options" fold.
+  Empty states are one line. All screens, workflows, element ids and
+  the glass theme are unchanged.
+- **`#token=` deep link.** The GUI accepts `#token=<admin token>` on
+  load: the token is stored in sessionStorage and the fragment is
+  stripped immediately. Used by the browser extension and by
+  automation (a screen name may follow, e.g. `#token=…&tasks`).
+
 ## v2.2.0 — 2026-11-15
 
 Collaboration: different agents work on the same task together.
