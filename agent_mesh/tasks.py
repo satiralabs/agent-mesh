@@ -5,6 +5,14 @@ is the lead participant; others are collaborators who can see the task,
 comment on its shared thread and add progress notes, but cannot drive
 its lifecycle) and a comment THREAD that travels with the task across
 nodes exactly like its progress notes do.
+
+v2.2.2: participant REMOVALS propagate across nodes as tombstones.
+Every removal records {agent_id, removed_at, removed_by} in
+task_participant_removals, and snapshots carry that list alongside the
+roster. The merge rule is timestamp-based: an add loses to a tombstone
+whose removed_at is >= the add's added_at, and a (re)add NEWER than
+the tombstone revives the participant — so removals, re-adds and
+out-of-order delivery all converge on the same roster.
 """
 import json
 import os
@@ -94,6 +102,19 @@ class TaskStore:
                     body TEXT NOT NULL,
                     created_at REAL NOT NULL
                 )""")
+            # v2.2.2 removal tombstones: one row per (task, agent)
+            # ever removed, holding the LATEST removal. Kept apart
+            # from task_participants so a tombstone exists even on a
+            # node where the agent has no participant row (yet) — a
+            # stale add arriving afterwards still loses to it.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS task_participant_removals (
+                    task_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    removed_at REAL NOT NULL,
+                    removed_by TEXT DEFAULT '',
+                    PRIMARY KEY (task_id, agent_id)
+                )""")
             conn.execute(
                 "INSERT OR IGNORE INTO task_participants "
                 "(task_id, agent_id, role, added_by, added_at) "
@@ -127,6 +148,35 @@ class TaskStore:
         return [dict(r) for r in rows]
 
     @staticmethod
+    def _removal_rows(conn, task_id: str) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            "SELECT agent_id, removed_at, removed_by "
+            "FROM task_participant_removals WHERE task_id=? "
+            "ORDER BY removed_at, agent_id", (task_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    @staticmethod
+    def _record_removal(conn, task_id: str, agent_id: str,
+                        removed_at: float, removed_by: str) -> None:
+        """Upsert a removal tombstone, keeping the LATEST removed_at
+        (removals merge as a union by (task, agent))."""
+        row = conn.execute(
+            "SELECT removed_at FROM task_participant_removals "
+            "WHERE task_id=? AND agent_id=?",
+            (task_id, agent_id)).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO task_participant_removals "
+                "(task_id, agent_id, removed_at, removed_by) "
+                "VALUES (?,?,?,?)",
+                (task_id, agent_id, removed_at, removed_by))
+        elif removed_at > row["removed_at"]:
+            conn.execute(
+                "UPDATE task_participant_removals SET removed_at=?, "
+                "removed_by=? WHERE task_id=? AND agent_id=?",
+                (removed_at, removed_by, task_id, agent_id))
+
+    @staticmethod
     def _comment_rows(conn, task_id: str) -> List[Dict[str, Any]]:
         rows = conn.execute(
             "SELECT id, author, body, created_at FROM task_comments "
@@ -147,6 +197,10 @@ class TaskStore:
                 comments: bool = True) -> Dict[str, Any]:
         conn = self._conn()
         task["participants"] = self._participant_rows(conn, task["id"])
+        # v2.2.2: the tombstone list rides on every task payload —
+        # it is what makes a task snapshot self-contained for the
+        # federation merge (and shows who was removed, when, by whom).
+        task["participant_removals"] = self._removal_rows(conn, task["id"])
         if comments:
             task["comments"] = self._comment_rows(conn, task["id"])
         conn.close()
@@ -297,8 +351,8 @@ class TaskStore:
         conn.close()
         return self.get(task_id)
 
-    def remove_participant(self, task_id: str,
-                           agent_id: str) -> Dict[str, Any]:
+    def remove_participant(self, task_id: str, agent_id: str,
+                           removed_by: str = "") -> Dict[str, Any]:
         task = self.get(task_id)
         if task is None:
             raise KeyError(f"task not found: {task_id}")
@@ -309,6 +363,7 @@ class TaskStore:
             raise ValueError(
                 "the lead (primary assignee) cannot be removed from "
                 "its own task")
+        now = time.time()
         conn = self._conn()
         with conn:
             cur = conn.execute(
@@ -317,8 +372,12 @@ class TaskStore:
             if cur.rowcount == 0:
                 raise KeyError(
                     f"agent {agent_id} is not a participant of {task_id}")
+            # v2.2.2: leave a tombstone so the removal propagates —
+            # the next snapshot carries it to every peer, where it
+            # drops the agent from that copy's roster too.
+            self._record_removal(conn, task_id, agent_id, now, removed_by)
             conn.execute("UPDATE tasks SET updated_at=? WHERE id=?",
-                         (time.time(), task_id))
+                         (now, task_id))
         conn.close()
         return self.get(task_id)
 
@@ -417,6 +476,67 @@ class TaskStore:
         conn.close()
         return self._row(row) if row else None
 
+    def _merge_participants(self, conn, task_id: str,
+                            snap: Dict[str, Any],
+                            assignee_agent: Optional[str],
+                            now: float) -> None:
+        """Merge a snapshot's roster + removal tombstones (v2.2.2).
+
+        1. Tombstones union in, keeping the latest removed_at.
+        2. A local participant whose add is NOT newer than its
+           tombstone is dropped.
+        3. Snapshot adds union in — except an add whose added_at is
+           <= the tombstone's removed_at (the removal is newer, the
+           agent stays out). A (re)add NEWER than the tombstone
+           revives the participant and refreshes its row.
+        The lead (assignee) is immune throughout: it can never be
+        removed, so no tombstone applies to it."""
+        for r in snap.get("participant_removals") or []:
+            if r.get("agent_id") and r.get("removed_at"):
+                self._record_removal(conn, task_id, r["agent_id"],
+                                     float(r["removed_at"]),
+                                     r.get("removed_by") or "")
+        tomb = {r["agent_id"]: r["removed_at"]
+                for r in self._removal_rows(conn, task_id)}
+        for p in self._participant_rows(conn, task_id):
+            agent = p["agent_id"]
+            if agent != assignee_agent and agent in tomb \
+                    and tomb[agent] >= (p.get("added_at") or 0):
+                conn.execute(
+                    "DELETE FROM task_participants WHERE task_id=? "
+                    "AND agent_id=?", (task_id, agent))
+        have = {p["agent_id"]: p
+                for p in self._participant_rows(conn, task_id)}
+        adds = list(snap.get("participants") or [])
+        if assignee_agent and assignee_agent not in \
+                {p.get("agent_id") for p in adds}:
+            # Snapshots from before v2.2 may not list the lead in the
+            # roster; the assignee is always its own lead participant.
+            adds.append({"agent_id": assignee_agent, "role": "lead",
+                         "added_by": snap.get("requester") or "",
+                         "added_at": snap.get("created_at") or now})
+        for p in adds:
+            agent = p.get("agent_id")
+            if not agent:
+                continue
+            added_at = p.get("added_at") or now
+            if agent != assignee_agent and agent in tomb \
+                    and tomb[agent] >= added_at:
+                continue  # the removal is newer than this add
+            role = "lead" if agent == assignee_agent \
+                else (p.get("role") or "collaborator")
+            cur = have.get(agent)
+            if cur is None:
+                self._insert_participant(
+                    conn, task_id, agent, role,
+                    p.get("added_by") or "", added_at)
+            elif added_at > (cur.get("added_at") or 0):
+                conn.execute(
+                    "UPDATE task_participants SET role=?, added_by=?, "
+                    "added_at=? WHERE task_id=? AND agent_id=?",
+                    (role, p.get("added_by") or "", added_at,
+                     task_id, agent))
+
     def _merge_state(self, task_id: str, snap: Dict[str, Any]) -> Dict[str, Any]:
         task = self.get(task_id)
         cur_rank = self._RANK.get(task["status"], 0)
@@ -442,25 +562,15 @@ class TaskStore:
                 (status, result, json.dumps(notes),
                  max(task["updated_at"], snap.get("updated_at") or 0),
                  task_id))
-            # v2.2: participants merge as a union by agent id, comments
-            # as a union by comment id (comments are append-only, and
-            # their ids are globally unique, so re-delivery and
-            # out-of-order delivery are harmless). Removals do not
-            # propagate — the same monotonic rule as progress notes.
-            have = {p["agent_id"] for p in task.get("participants") or []}
-            for p in snap.get("participants") or []:
-                if p.get("agent_id") and p["agent_id"] not in have:
-                    self._insert_participant(
-                        conn, task_id, p["agent_id"],
-                        p.get("role") or "collaborator",
-                        p.get("added_by") or "",
-                        p.get("added_at") or time.time())
-                    have.add(p["agent_id"])
-            if snap.get("assignee_agent") \
-                    and snap["assignee_agent"] not in have:
-                self._insert_participant(
-                    conn, task_id, snap["assignee_agent"], "lead",
-                    snap.get("requester") or "", time.time())
+            # v2.2: comments merge as a union by comment id (they are
+            # append-only, and their ids are globally unique, so
+            # re-delivery and out-of-order delivery are harmless).
+            # v2.2.2: the roster merges through the tombstone-aware
+            # helper — adds union in, removals propagate.
+            self._merge_participants(
+                conn, task_id, snap,
+                task.get("assignee_agent") or snap.get("assignee_agent"),
+                time.time())
             seen_comments = {c["id"] for c in task.get("comments") or []}
             for c in snap.get("comments") or []:
                 if c.get("id") and c["id"] not in seen_comments:
@@ -507,18 +617,11 @@ class TaskStore:
             # v2.2: the snapshot's participants + comment thread are
             # stored against the NEW local copy id (comment ids stay
             # the sender's — they are the cross-node dedupe key).
-            if snap.get("assignee_agent"):
-                self._insert_participant(
-                    conn, task_id, snap["assignee_agent"], "lead",
-                    snap.get("requester") or "",
-                    snap.get("created_at") or now)
-            for p in snap.get("participants") or []:
-                if p.get("agent_id"):
-                    self._insert_participant(
-                        conn, task_id, p["agent_id"],
-                        p.get("role") or "collaborator",
-                        p.get("added_by") or "",
-                        p.get("added_at") or now)
+            # v2.2.2: the roster goes through the tombstone-aware
+            # merge, so a snapshot whose removals postdate an add
+            # never resurrects a removed collaborator here.
+            self._merge_participants(
+                conn, task_id, snap, snap.get("assignee_agent"), now)
             for c in snap.get("comments") or []:
                 if c.get("id"):
                     conn.execute(

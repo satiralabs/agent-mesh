@@ -282,7 +282,10 @@ class Node:
         Targets: the assignee's home node and the origin node (the
         classic pair), PLUS — v2.2 — the home node of every remote
         participant, so a collaborator on a third node sees the task
-        and its thread even when the lead sits on this node. (Relay is
+        and its thread even when the lead sits on this node — PLUS,
+        v2.2.2, the home node of every REMOVED participant, so the
+        removal tombstone reaches the copy that still lists them.
+        (Relay is
         star-shaped around the origin: a node that merges a snapshot
         does not re-forward it, so multi-hop chains converge through
         the origin node's own syncs.)"""
@@ -292,6 +295,14 @@ class Node:
                 targets.add(task[key])
         for p in task.get("participants") or []:
             remote = self.peers.find_remote_agent(p["agent_id"])
+            if remote:
+                targets.add(remote["home_node"])
+        # v2.2.2: a REMOVED participant's home node is also a target —
+        # it no longer appears in the roster above, but its copy must
+        # receive the snapshot carrying the removal tombstone so the
+        # agent is dropped there too.
+        for r in task.get("participant_removals") or []:
+            remote = self.peers.find_remote_agent(r["agent_id"])
             if remote:
                 targets.add(remote["home_node"])
         targets.discard(self.node_id)
@@ -1394,7 +1405,7 @@ def make_handler(node: Node):
                                      "may remove participants"})
                     try:
                         task = node.tasks.remove_participant(
-                            task_id, agent_id)
+                            task_id, agent_id, removed_by=actor["id"])
                     except KeyError as exc:
                         return self._send(404, {"error": str(exc)})
                     except (InvalidTransition, ValueError) as exc:
