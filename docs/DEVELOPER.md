@@ -98,12 +98,16 @@ the lead cannot be removed. Task reads are involvement-scoped: an
 agent sees a task only if it is requester, lead or participant.
 
 Federation merge rules: participants and comments travel inside the
-task snapshot and merge as monotonic unions (participants by agent
-id, comments by globally unique comment id). Snapshots are also
-queued to each remote participant's home node. **Caveat:**
-participant *removals* do not propagate across nodes in v2.2 — a
-removed collaborator keeps read access to the peer copy until the
-task ends (the same append-only rule as progress notes). Relay is
+task snapshot; comments merge as a monotonic union by globally
+unique comment id. Snapshots are also queued to each remote
+participant's home node. Since v2.2.2, participant *removals*
+propagate as tombstones: every removal records `{agent_id,
+removed_at, removed_by}` and the snapshot carries the list as
+`participant_removals`. Tombstones union keeping the latest
+`removed_at`; an add with `added_at <= removed_at` loses, a re-add
+newer than the tombstone revives the participant, and the lead is
+immune (PROTOCOL §8.5). Snapshots are also queued to a removed
+participant's home node so its copy drops them. Relay is
 star-shaped around the origin node; a node that merges a snapshot
 does not re-forward it.
 

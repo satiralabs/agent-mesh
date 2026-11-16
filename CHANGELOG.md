@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.2.2 — 2026-11-16
+
+Federation fix: participant removals now propagate across nodes.
+
+- **Removal tombstones.** `DELETE /tasks/{id}/participants/{agent_id}`
+  records `{agent_id, removed_at, removed_by}` in a new
+  `task_participant_removals` table, and task snapshots carry the
+  list as `participant_removals` next to the active-only
+  `participants` roster. Previously (v2.2.0–v2.2.1) rosters merged as
+  monotonic unions, so a removed collaborator kept read access to
+  the peer copy until the task ended.
+- **Timestamp merge rule.** Tombstones union by (task, agent)
+  keeping the latest `removed_at`; an add loses to a tombstone with
+  `removed_at >= added_at` (even for an agent the receiving node
+  never saw — the tombstone is stored on its own); a (re)add newer
+  than the tombstone revives the participant; the lead (primary
+  assignee) is immune, as before. Both federation entry points
+  (`upsert_federated`, `apply_remote_state`) merge through the one
+  tombstone-aware helper.
+- **Sync targets.** A snapshot is now also queued to a *removed*
+  participant's home node, so the copy that still lists them is the
+  one that receives their removal.
+- **Tests.** Phase 10: store-level merge-rule tests with fixed
+  timestamps plus a two-process federation round-trip — collaborator
+  on B removed on A drops off B's copy and gets 403; re-adding on A
+  restores them on B. Suite: 127 tests.
+
 ## v2.2.1 — 2026-11-15
 
 Brand + GUI polish release.

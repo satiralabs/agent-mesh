@@ -307,6 +307,10 @@ final result. Everyone else is a **collaborator**.
   `DELETE /tasks/{id}/participants/{agent_id}` manage the roster —
   **requester or owner (admin) only**, and only while the task is not
   terminal (DONE / FAILED / REJECTED). The lead cannot be removed.
+  A removal is recorded as a tombstone and propagates to every node
+  holding a copy (§8.5); the task object exposes the tombstones as
+  `participant_removals` next to the active-only `participants`
+  roster.
 - Being added is being tasked: every participant must pass the §5
   ordering matrix, exactly as an assignee would (a worker cannot pull
   in another agent; an orchestrator cannot pull in an owner-role
@@ -346,10 +350,26 @@ picked up.
 Participants and comments travel inside the task snapshot.
 Snapshots are also queued to each remote participant's home node, so
 a task whose lead is local still appears for a collaborator on a
-peer node. Merges are monotonic unions: participants by agent id,
-comments by their globally unique comment id. Participant
-**removals do not propagate** across nodes in v2.2 (the same
-append-only rule as progress notes); a removed collaborator keeps
-read access to the peer copy until the task ends. Relay is
-star-shaped around the origin node — a node that merges a snapshot
-does not re-forward it.
+peer node. Comments merge as a monotonic union by their globally
+unique comment id (the same append-only rule as progress notes).
+
+Participant **removals propagate as tombstones** (v2.2.2). Every
+removal records `{agent_id, removed_at, removed_by}` and the list
+travels in the snapshot as `participant_removals`, alongside the
+roster; snapshots are also queued to a removed participant's home
+node, so the copy that still lists them receives it. The merge rule
+is timestamp-based, applied identically on every node:
+
+- Tombstones union by (task, agent), keeping the **latest**
+  `removed_at`.
+- An add loses to a tombstone whose `removed_at` is **>=** the
+  add's `added_at` — including an add for an agent the receiving
+  node has never seen (the tombstone is stored on its own, so a
+  stale snapshot delivered late cannot resurrect anyone).
+- A (re)add **newer** than the tombstone revives the participant.
+- The lead is immune: no tombstone ever applies to the assignee.
+
+Because both lists and both timestamps travel in every snapshot,
+removals, re-adds and out-of-order delivery converge on the same
+roster everywhere. Relay is star-shaped around the origin node — a
+node that merges a snapshot does not re-forward it.

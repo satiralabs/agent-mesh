@@ -404,8 +404,8 @@ class TestVersion(unittest.TestCase):
         # suite fails until every version surface agrees.
         # (Expectation moved 2.0.0 -> 2.0.1 -> 2.1.0 -> 2.1.1 with
         # each release.)
-        self.assertEqual(MESH_VERSION, "2.2.1")
-        self.assertEqual(SERVER_INFO["version"], "2.2.1")
+        self.assertEqual(MESH_VERSION, "2.2.2")
+        self.assertEqual(SERVER_INFO["version"], "2.2.2")
 
 
 if __name__ == "__main__":
